@@ -563,7 +563,7 @@ class DirectHttpInstaller(AppUpdater):
 
         try:
             req = urllib.request.Request(
-                url, headers={"User-Agent": "PatchWise-Desktop-Updater/3.0"}
+                url, headers={"User-Agent": "PatchWise/1.0"}
             )
             with urllib.request.urlopen(req, timeout=30) as response, open(dest_file, "wb") as out:
                 total_bytes = int(response.headers.get("Content-Length", "0") or 0)

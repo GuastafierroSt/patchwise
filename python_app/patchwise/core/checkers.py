@@ -343,7 +343,7 @@ class GitHubReleasesChecker(VersionChecker):
             url,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "PatchWise-Desktop-Updater/3.0",
+                "User-Agent": "PatchWise/1.0",
             },
         )
         try:

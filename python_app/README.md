@@ -1,8 +1,8 @@
-# PatchWise Desktop v3.0 — Software & Driver Updater (Portable)
+# PatchWise v1.0.0 — Software & Driver Updater (Portable)
 
 Applicazione desktop Windows (stile Apple Liquid Glass, tema chiaro/scuro) sviluppata in Python con architettura OOP a classi per:
 1. **Aggiornamenti Applicazioni**: scansione locale tramite Registro di Windows (`WindowsRegistryDetector`) e Winget (`WingetDetector`), confronto online (`WingetVersionChecker`, `GitHubReleasesChecker`) e aggiornamento manuale (`WingetAppUpdater`, `DirectHttpInstaller`).
-2. **Aggiornamenti Driver (v3.0)**: scansione hardware locale tramite Registro di Windows (`WindowsDriverRegistryDetector`) e WMI/CIM (`WindowsCimDriverDetector`), ricerca driver ufficiali firmati WHQL tramite Windows Update Agent (`WindowsUpdateDriverChecker`) e installazione manuale controllata (`WindowsUpdateDriverUpdater`).
+2. **Aggiornamenti Driver**: scansione hardware locale tramite Registro di Windows (`WindowsDriverRegistryDetector`) e WMI/CIM (`WindowsCimDriverDetector`), ricerca driver ufficiali firmati WHQL tramite Windows Update Agent (`WindowsUpdateDriverChecker`) e installazione manuale controllata (`WindowsUpdateDriverUpdater`).
 3. **Aggiornamento esclusivamente manuale** (`AUTO_UPDATE_ALLOWED = False`): nessun interruttore o pianificazione di auto-update.
 4. **Monitoraggio live e Centro Notifiche**: barra di avanzamento dedicata visibile solo durante il download, notifiche con badge campanella e toast discreto in basso a destra.
 5. **Cronologia stateless di sessione** (`StatelessSessionHistoryManager`): mantiene in RAM gli aggiornamenti di app e driver della sessione attiva e salva su chiusura solo uno snapshot volatile in `%TEMP%\patchwise_last_session.json`.

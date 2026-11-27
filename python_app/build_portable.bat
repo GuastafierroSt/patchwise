@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo   PatchWise Desktop - Build Eseguibile Portable (.EXE)
+echo   PatchWise - Build Eseguibile Portable (.EXE)
 echo ============================================================
 echo.
 

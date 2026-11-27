@@ -24,6 +24,9 @@ htmlcov/
 *.spec
 *.exe
 
+# Mockup e screenshot locali per landing page (non committare)
+img/
+
 # Ambiente & log
 .env*
 !.env.example

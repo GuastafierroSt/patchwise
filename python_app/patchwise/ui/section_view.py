@@ -67,7 +67,7 @@ class UpdateSectionConfig:
 
 
 APPS_SECTION_CONFIG = UpdateSectionConfig(
-    page_title="Aggiornamenti Applicazioni",
+    page_title="Aggiornamenti App",
     search_placeholder="Cerca programmi installati o aggiornamenti...",
     idle_headline="Pronto per la scansione delle applicazioni",
     idle_subtitle="Premi 'Nuova Scansione' per rilevare le app sul PC e confrontarle con le versioni online.",
@@ -95,7 +95,7 @@ APPS_SECTION_CONFIG = UpdateSectionConfig(
 
 
 DRIVERS_SECTION_CONFIG = UpdateSectionConfig(
-    page_title="Aggiornamenti Driver",
+    page_title="Aggiorna Driver",
     search_placeholder="Cerca driver o periferiche hardware...",
     idle_headline="Pronto per la scansione dei driver",
     idle_subtitle="Premi 'Nuova Scansione' per rilevare i driver di sistema e verificare aggiornamenti ufficiali WHQL.",

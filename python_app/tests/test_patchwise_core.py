@@ -415,8 +415,8 @@ class PatchWiseCoreTests(unittest.TestCase):
             self.assertTrue(ensure_output_writable(fake_exe, kill_running=False))
             self.assertFalse(fake_exe.exists())
 
-    def test_major_version_is_v3_and_driver_engine_parses_wua_and_cim(self) -> None:
-        self.assertTrue(__version__.startswith("3."))
+    def test_release_version_is_v1_and_driver_engine_parses_wua_and_cim(self) -> None:
+        self.assertEqual(__version__, "1.0.0")
         self.assertFalse(WindowsUpdateDriverUpdater.AUTO_UPDATE_SUPPORTED)
 
         cim_json = (
@@ -792,6 +792,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
     def test_dark_and_light_theme_switch_and_sans_serif_typography(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             window = self._make_window(tmp)
+            self.assertEqual(window.windowTitle(), "PatchWise v1.0.0")
             self.assertEqual(window.current_theme, "light")
             self.assertFalse(window.dark_theme_toggle.isChecked())
             self.assertFalse(window.windowIcon().isNull())
@@ -965,10 +966,12 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
             window = self._make_window(tmp)
             window.show()
 
-            # Switch to Aggiornamenti Driver tab
+            # Switch to Drivers tab
+            from patchwise.ui.section_view import DRIVERS_SECTION_CONFIG
+
             window.nav_drivers.click()
             self.assertEqual(window.stack.currentIndex(), 1)
-            self.assertEqual(window.topbar_title.text(), "Aggiornamenti Driver")
+            self.assertEqual(window.topbar_title.text(), DRIVERS_SECTION_CONFIG.page_title)
             self.assertFalse(window.drivers_section.is_expanded)
             self.assertTrue(window.drivers_section.download_banner.isHidden())
 

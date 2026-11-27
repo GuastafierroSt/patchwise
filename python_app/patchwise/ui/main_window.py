@@ -1,4 +1,4 @@
-"""Main desktop window class for PatchWise Software & Driver Updater (v3.0)."""
+"""Main desktop window class for PatchWise Software & Driver Updater."""
 
 from __future__ import annotations
 
@@ -100,9 +100,7 @@ class PatchWiseMainWindow(QMainWindow):
         self._notifications: List[NotificationItem] = []
         self._active_detail_dialog: Optional[NotificationDetailDialog] = None
 
-        self.setWindowTitle(
-            f"PatchWise Desktop — Software & Driver Updater v{__version__} (Portable)"
-        )
+        self.setWindowTitle(f"PatchWise v{__version__}")
         self.setWindowIcon(load_app_icon())
         self.resize(1240, 820)
 
@@ -229,9 +227,9 @@ class PatchWiseMainWindow(QMainWindow):
         nav_heading.setObjectName("NavGroupLabel")
         sb_layout.addWidget(nav_heading)
 
-        self.nav_dashboard = self._make_nav_button("Aggiornamenti App", 0, active=True)
-        self.nav_drivers = self._make_nav_button("Aggiornamenti Driver", 1, active=False)
-        self.nav_history = self._make_nav_button("Cronologia di Sessione", 2, active=False)
+        self.nav_dashboard = self._make_nav_button("Aggiorna App", 0, active=True)
+        self.nav_drivers = self._make_nav_button("Aggiorna Driver", 1, active=False)
+        self.nav_history = self._make_nav_button("Cronologia", 2, active=False)
         sb_layout.addWidget(self.nav_dashboard)
         sb_layout.addWidget(self.nav_drivers)
         sb_layout.addWidget(self.nav_history)
@@ -391,7 +389,7 @@ class PatchWiseMainWindow(QMainWindow):
             return
         section = self.active_section
         if section is None:
-            self.topbar_title.setText("Cronologia di Sessione")
+            self.topbar_title.setText("Cronologia")
             self.search_input.setVisible(False)
             self.scan_btn.setVisible(False)
             self.update_all_btn.setVisible(False)
@@ -656,11 +654,10 @@ class PatchWiseMainWindow(QMainWindow):
         layout.setContentsMargins(26, 22, 26, 22)
         layout.setSpacing(16)
 
-        header = QLabel("Cronologia Aggiornamenti (Stateless)")
+        header = QLabel("Cronologia Aggiornamenti")
         header.setObjectName("Headline")
         desc = QLabel(
-            "Mostra gli aggiornamenti di applicazioni e driver della sessione attiva in RAM e, "
-            "al riavvio, solo il riepilogo dell'ultima sessione chiusa."
+            "Mostra gli aggiornamenti di applicazioni e driver della sessione attiva e solo il riepilogo dell'ultima sessione chiusa."
         )
         desc.setObjectName("MutedText")
         layout.addWidget(header)

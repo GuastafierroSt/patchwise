@@ -129,7 +129,7 @@ def ensure_output_writable(output_bin: Path, kill_running: bool = True) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compila PatchWise Desktop in un eseguibile Windows .EXE portable."
+        description="Compila PatchWise in un eseguibile Windows .EXE portable."
     )
     parser.add_argument(
         "--name",
