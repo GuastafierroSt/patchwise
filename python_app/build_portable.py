@@ -65,6 +65,14 @@ def build_pyinstaller_command(
     ]
     if clean:
         cmd.append("--clean")
+    assets_dir = project_root / "assets"
+    if assets_dir.exists():
+        sep = ";" if sys.platform.startswith("win") else ":"
+        cmd.extend(["--add-data", f"{assets_dir}{sep}assets"])
+    if icon_path is None:
+        default_icon = assets_dir / "patchwise.ico"
+        if default_icon.exists():
+            icon_path = default_icon
     if icon_path and icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])
 

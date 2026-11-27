@@ -107,9 +107,12 @@ class UpdateManagerController:
 
         candidate.status = UpdatePhase.DOWNLOADING
         record = updater.execute_update(candidate, on_progress, self._active_control)
-        candidate.status = (
-            UpdatePhase.COMPLETED if record.status == "success" else UpdatePhase.FAILED
-        )
+        if record.status == "success":
+            candidate.status = UpdatePhase.COMPLETED
+        elif record.status == "cancelled":
+            candidate.status = UpdatePhase.CANCELLED
+        else:
+            candidate.status = UpdatePhase.FAILED
         self._history.record_update(record)
         self._active_control = None
         return record

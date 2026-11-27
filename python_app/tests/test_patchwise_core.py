@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -242,6 +244,219 @@ class PatchWiseCoreTests(unittest.TestCase):
         self.assertIn("--onefile", cmd)
         self.assertIn("--windowed", cmd)
         self.assertIn("PatchWise_Portable", cmd)
+        self.assertIn("--icon", cmd)
+        self.assertIn("--add-data", cmd)
+        self.assertTrue(any("patchwise.ico" in arg for arg in cmd))
+
+
+try:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from patchwise.ui.main_window import PatchWiseMainWindow
+    from patchwise.ui.widgets import ActiveDownloadBanner
+
+    HAS_PYSIDE6 = True
+except ImportError:
+    HAS_PYSIDE6 = False
+
+
+@unittest.skipUnless(HAS_PYSIDE6, "PySide6 non disponibile nell'ambiente di test")
+class PatchWiseUiFeedbackTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _make_window(self, tmp_dir: str) -> "PatchWiseMainWindow":
+        history = StatelessSessionHistoryManager(Path(tmp_dir) / "snap.json")
+        controller = UpdateManagerController(
+            detector=StubDetector("stub", []),
+            checker=StubVersionChecker({}),
+            updaters=[StubUpdater()],
+            history=history,
+        )
+        window = PatchWiseMainWindow(controller=controller)
+        self.addCleanup(window.close)
+        return window
+
+    def test_active_download_banner_resets_after_completion_or_failure(self) -> None:
+        banner = ActiveDownloadBanner(on_pause_toggle=lambda: None, on_cancel=lambda: None)
+        self.addCleanup(banner.deleteLater)
+
+        banner.update_progress(
+            DownloadProgress(
+                app_id="teams",
+                app_name="Microsoft Teams",
+                phase=UpdatePhase.DOWNLOADING,
+                percent=55.0,
+                message="Download in corso...",
+            )
+        )
+        self.assertIn("Microsoft Teams", banner.title_label.text())
+        self.assertEqual(banner.progress_bar.value(), 55)
+        self.assertTrue(banner.cancel_btn.isEnabled())
+
+        banner.update_progress(
+            DownloadProgress(
+                app_id="teams",
+                app_name="Microsoft Teams",
+                phase=UpdatePhase.COMPLETED,
+                percent=100.0,
+                message="Completato",
+            )
+        )
+        self.assertEqual(banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE)
+        self.assertEqual(banner.progress_bar.value(), 0)
+        self.assertFalse(banner.cancel_btn.isEnabled())
+        self.assertFalse(banner.pause_btn.isEnabled())
+
+        banner.update_progress(
+            DownloadProgress(
+                app_id="chrome",
+                app_name="Google Chrome",
+                phase=UpdatePhase.DOWNLOADING,
+                percent=30.0,
+                message="Download in corso...",
+            )
+        )
+        banner.update_progress(
+            DownloadProgress(
+                app_id="chrome",
+                app_name="Google Chrome",
+                phase=UpdatePhase.FAILED,
+                percent=30.0,
+                message="Errore",
+            )
+        )
+        self.assertEqual(banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE)
+        self.assertEqual(banner.progress_bar.value(), 0)
+        self.assertFalse(banner.cancel_btn.isEnabled())
+
+    def test_successful_update_shows_success_toast_clears_banner_and_starts_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            window.show()
+            record = UpdateRecord(
+                record_id="r-ok",
+                app_id="teams",
+                app_name="Microsoft Teams",
+                publisher="Microsoft",
+                from_version="1.0",
+                to_version="2.0",
+                size_mb=90.0,
+                category=UpdateCategory.PATCH,
+                status="success",
+                duration_seconds=3.5,
+            )
+
+            window._on_progress_changed(
+                DownloadProgress(
+                    app_id="teams",
+                    app_name="Microsoft Teams",
+                    phase=UpdatePhase.DOWNLOADING,
+                    percent=70.0,
+                    message="Download...",
+                )
+            )
+            with patch.object(window, "start_scan") as mock_scan:
+                window._on_item_completed(record)
+                window._on_batch_finished([record])
+
+                self.assertEqual(
+                    window.download_banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE
+                )
+                self.assertEqual(window.download_banner.progress_bar.value(), 0)
+                self.assertTrue(window.notification_banner.isVisible())
+                self.assertEqual(window.notification_banner.level, "success")
+                self.assertIn("Microsoft Teams", window.notification_banner.message_label.text())
+                mock_scan.assert_called_once()
+
+    def test_failed_update_shows_warning_toast_clears_banner_without_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            window.show()
+            record = UpdateRecord(
+                record_id="r-err",
+                app_id="chrome",
+                app_name="Google Chrome",
+                publisher="Google",
+                from_version="158.0",
+                to_version="159.0",
+                size_mb=120.0,
+                category=UpdateCategory.SECURITY,
+                status="failed",
+                duration_seconds=2.1,
+                error_message="Winget terminato con codice 1",
+            )
+
+            window._on_progress_changed(
+                DownloadProgress(
+                    app_id="chrome",
+                    app_name="Google Chrome",
+                    phase=UpdatePhase.DOWNLOADING,
+                    percent=40.0,
+                    message="Download...",
+                )
+            )
+            with patch.object(window, "start_scan") as mock_scan:
+                window._on_item_completed(record)
+                window._on_batch_finished([record])
+
+                self.assertEqual(
+                    window.download_banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE
+                )
+                self.assertEqual(window.download_banner.progress_bar.value(), 0)
+                self.assertTrue(window.notification_banner.isVisible())
+                self.assertEqual(window.notification_banner.level, "warning")
+                self.assertIn("Google Chrome", window.notification_banner.message_label.text())
+                self.assertIn(
+                    "Winget terminato con codice 1",
+                    window.notification_banner.message_label.text(),
+                )
+                mock_scan.assert_not_called()
+
+            window.notification_banner.dismiss()
+            self.assertFalse(window.notification_banner.isVisible())
+
+    def test_sidebar_collapses_and_expands_via_toggle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            self.assertTrue(window.is_sidebar_open)
+            self.assertEqual(window.sidebar.maximumWidth(), window.SIDEBAR_WIDTH)
+            self.assertTrue(window.topbar_logo.isHidden())
+
+            window.toggle_sidebar(animate=False)
+            self.assertFalse(window.is_sidebar_open)
+            self.assertEqual(window.sidebar.maximumWidth(), 0)
+            self.assertFalse(window.topbar_logo.isHidden())
+            self.assertIn("Apri", window.sidebar_toggle_btn.toolTip())
+
+            window.toggle_sidebar(animate=False)
+            self.assertTrue(window.is_sidebar_open)
+            self.assertEqual(window.sidebar.maximumWidth(), window.SIDEBAR_WIDTH)
+            self.assertTrue(window.topbar_logo.isHidden())
+            self.assertIn("Chiudi", window.sidebar_toggle_btn.toolTip())
+
+    def test_dark_and_light_theme_switch_and_sans_serif_typography(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            self.assertEqual(window.current_theme, "light")
+            self.assertFalse(window.dark_theme_toggle.isChecked())
+            self.assertFalse(window.windowIcon().isNull())
+            self.assertFalse(window.brand_logo.pixmap().isNull())
+            self.assertIn("Helvetica", window.styleSheet())
+            self.assertNotIn("Noto Serif", window.styleSheet())
+
+            window.dark_theme_toggle.setChecked(True)
+            self.assertEqual(window.current_theme, "dark")
+            self.assertIn("#0e0b1d", window.styleSheet())
+            self.assertIn("#3bdbf6", window.styleSheet())
+            self.assertIn("Helvetica", window.styleSheet())
+
+            window.dark_theme_toggle.setChecked(False)
+            self.assertEqual(window.current_theme, "light")
+            self.assertIn("#f6f5fc", window.styleSheet())
+            self.assertIn("#5c4fd6", window.styleSheet())
 
 
 if __name__ == "__main__":

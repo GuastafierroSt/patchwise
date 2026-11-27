@@ -20,6 +20,16 @@ def resolve_runtime_root() -> Path:
 
 def main() -> int:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(  # type: ignore[attr-defined]
+                "PatchWise.Desktop.Updater"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     runtime_root = resolve_runtime_root()
     if str(runtime_root) not in sys.path:
         sys.path.insert(0, str(runtime_root))
@@ -27,11 +37,13 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     from patchwise import __app_name__, __version__
+    from patchwise.ui.icons import load_app_icon
     from patchwise.ui.main_window import PatchWiseMainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName(__app_name__)
     app.setApplicationVersion(__version__)
+    app.setWindowIcon(load_app_icon())
 
     window = PatchWiseMainWindow()
     window.show()
