@@ -28,26 +28,6 @@
 
 ---
 
-## Funzionalità principali
-
-- **Aggiornamento Applicazioni (Winget + Registro + GitHub Releases)**
-  - Rileva automaticamente il software installato unendo il Registro di Windows (`HKLM` / `HKCU`) e **Windows Package Manager (`winget`)**, inclusi i pacchetti che richiedono *targeting esplicito* (come Discord).
-  - Aggiornamento silenzioso (`--silent`) di default con **fallback automatico a modalità interattiva (`--interactive`)** quando un installer richiede la disinstallazione della versione precedente o conferma utente (es. errore `0x8A150030` / `1603`).
-- **Aggiornamento Driver Hardware (WHQL via Windows Update Agent)**
-  - Rileva i driver installati sul sistema tramite Registro (`Control\Class`) e WMI/CIM (`Win32_PnPSignedDriver`) e cerca gli aggiornamenti ufficiali firmati **WHQL** tramite Windows Update Agent (WUA).
-  - **Elevazione UAC on-demand**: PatchWise gira come utente standard e richiede i privilegi di Amministratore (UAC) **solo** quando avvii manualmente l'aggiornamento di un driver.
-- **Controllo 100% Manuale (Zero Auto-Update)**
-  - Per scelta architetturale (`AUTO_UPDATE_ALLOWED = False`), nessun aggiornamento parte mai in autonomia o su pianificazione: scegli tu se aggiornare una singola voce, selezionarne alcune o usare **Aggiorna tutto**.
-- **Design Apple Liquid Glass (Tema Chiaro & Scuro)**
-  - Superfici traslucide con highlight speculari, sidebar richiudibile, selettore tema chiaro/scuro sincronizzato con la titlebar nativa Windows DWM, barra di download live visibile solo durante l'avanzamento e animazioni fluide a 60 fps.
-- **Centro Notifiche & Diagnostica Errori Cliccabile**
-  - Badge campanella con cronologia notifiche e toast discreto in basso a destra.
-  - Cliccando su qualsiasi notifica o errore si apre la finestra **Dettagli diagnostici** con codice tecnico decodificato (Winget / WUA HRESULT), causa probabile, soluzioni consigliate e pulsante **Copia dettagli**.
-- **Cronologia Stateless & Portable-Friendly**
-  - Nessun database locale permanente: gli aggiornamenti della sessione restano in RAM e, alla chiusura, viene salvato solo uno snapshot volatile dell'ultima sessione in `%TEMP%\patchwise_last_session.json`.
-
----
-
 ## Avvio rapido (Utenti)
 
 1. Scarica **`PatchWise.exe`** dalla pagina delle [**Release ufficiali**](https://github.com/GuastafierroSt/patchWise/releases/latest) (oppure dal pulsante in alto).
