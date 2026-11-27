@@ -10,12 +10,12 @@
 [![Latest Release](https://img.shields.io/github/v/release/GuastafierroSt/patchWise?label=Release&color=685bd9&style=for-the-badge)](https://github.com/GuastafierroSt/patchWise/releases/latest)
 [![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011-0ea5e9?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/GuastafierroSt/patchWise/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.10%2B%20%7C%20PySide6-a451d6?style=for-the-badge&logo=python&logoColor=white)](python_app/)
-[![Portable](https://img.shields.io/badge/Portable-.EXE%20Single--File-10b981?style=for-the-badge)](https://github.com/GuastafierroSt/patchWise/releases/latest/download/PatchWise_Portable.exe)
+[![Portable](https://img.shields.io/badge/Portable-.EXE%20Single--File-10b981?style=for-the-badge)](https://github.com/GuastafierroSt/patchWise/releases/latest/download/PatchWise.exe)
 
 <br />
 
-<a href="https://github.com/GuastafierroSt/patchWise/releases/latest/download/PatchWise_Portable.exe">
-  <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Scarica%20PatchWise_Portable.exe-Windows%2064--bit-685bd9?style=for-the-badge" alt="Scarica PatchWise_Portable.exe" height="40" />
+<a href="https://github.com/GuastafierroSt/patchWise/releases/latest/download/PatchWise.exe">
+  <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Scarica%20PatchWise.exe-Windows%2064--bit-685bd9?style=for-the-badge" alt="Scarica PatchWise.exe" height="40" />
 </a>
 
 <sub>
@@ -57,7 +57,7 @@
 
 ## Avvio rapido (Utenti)
 
-1. Scarica **`PatchWise_Portable.exe`** dalla pagina delle [**Release ufficiali**](https://github.com/GuastafierroSt/patchWise/releases/latest) (oppure dal pulsante in alto).
+1. Scarica **`PatchWise.exe`** dalla pagina delle [**Release ufficiali**](https://github.com/GuastafierroSt/patchWise/releases/latest) (oppure dal pulsante in alto).
 2. Eseguilo direttamente con un doppio clic — **non richiede installazione né Python**.
 3. Clicca su **Nuova Scansione** nella sezione **Aggiorna App** o **Aggiorna Driver** e scegli cosa aggiornare.
 
@@ -128,7 +128,7 @@ Fai doppio clic su **`python_app\build_portable.bat`** oppure esegui da terminal
 cd python_app
 .\build_portable.bat
 ```
-Lo script rileva automaticamente CPython nativo Windows, prepara `.venv`, esegue tutti i test unitari e genera l'eseguibile autonomo in `python_app\dist\PatchWise_Portable.exe`.
+Lo script rileva automaticamente CPython nativo Windows, prepara `.venv`, esegue tutti i test unitari e genera l'eseguibile autonomo in `python_app\dist\PatchWise.exe`.
 
 ---
 
