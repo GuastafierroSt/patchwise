@@ -1,0 +1,6 @@
+{
+  "name": "PatchWise — Desktop Software Updater",
+  "description": "Applicazione desktop Python portable per scansionare i programmi installati, confrontare le versioni online, monitorare i download e consultare la cronologia stateless di sessione.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
