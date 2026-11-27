@@ -1,0 +1,73 @@
+name: Build & Release PatchWise Portable (Windows)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Nome del tag/release da pubblicare (es. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: python_app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: python_app/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit & UI test suite
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+
+      - name: Build PatchWise_Portable.exe
+        run: python build_portable.py --name PatchWise_Portable
+
+      - name: Generate SHA-256 checksum
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -Path "dist\PatchWise_Portable.exe").Hash.ToLower()
+          "$hash  PatchWise_Portable.exe" | Out-File -Encoding ascii -FilePath "dist\SHA256SUMS.txt"
+          Get-Content "dist\SHA256SUMS.txt"
+
+      - name: Determine release tag
+        id: meta
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "PatchWise ${{ steps.meta.outputs.tag }} (Windows Portable)"
+          generate_release_notes: true
+          files: |
+            python_app/dist/PatchWise_Portable.exe
+            python_app/dist/SHA256SUMS.txt
