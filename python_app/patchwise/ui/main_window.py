@@ -73,12 +73,12 @@ class PatchWiseMainWindow(QMainWindow):
         sb_layout.addWidget(self.nav_history)
         sb_layout.addStretch()
 
-        policy_note = QLabel(
-            "Modalità stateless attiva:\nnessun auto-update e nessun database permanente."
-        )
-        policy_note.setObjectName("MutedText")
-        policy_note.setWordWrap(True)
-        sb_layout.addWidget(policy_note)
+        #policy_note = QLabel(
+        #    "Modalità stateless attiva:\nnessun auto-update e nessun database permanente."
+        #)
+        #policy_note.setObjectName("MutedText")
+        #policy_note.setWordWrap(True)
+        #sb_layout.addWidget(policy_note)
 
         # Content stack
         self.stack = QStackedWidget()

@@ -163,7 +163,7 @@ class AppUpdateCard(QFrame):
         category_label = {
             "security": "Sicurezza Critica",
             "features": "Nuove Funzionalità",
-            "patch": "Bugfix e Stabilità",
+            "patch": "Bugfix",
         }.get(candidate.online.category.value, "Aggiornamento")
 
         header_label = QLabel(
