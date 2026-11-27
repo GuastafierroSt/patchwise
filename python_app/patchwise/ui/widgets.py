@@ -1,4 +1,4 @@
-"""Reusable modern PySide6 widgets for PatchWise Desktop.
+"""Reusable modern animated PySide6 widgets for PatchWise Desktop.
 
 IMPORTANT DESIGN CONSTRAINT:
 Auto-update toggles are strictly excluded from all cards and controls.
@@ -6,19 +6,24 @@ Auto-update toggles are strictly excluded from all cards and controls.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRectF,
+    QSequentialAnimationGroup,
     QSize,
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -27,6 +32,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -49,6 +55,16 @@ _AVATAR_GRADIENTS = (
 )
 
 
+@dataclass(frozen=True)
+class NotificationItem:
+    """Single feedback notification stored in the in-memory session notification center."""
+
+    title: str
+    message: str
+    level: str = "success"  # "success" | "warning"
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
+
+
 def _extract_initials(name: str) -> str:
     cleaned = [part for part in name.replace("-", " ").split() if part]
     if not cleaned:
@@ -61,6 +77,16 @@ def _extract_initials(name: str) -> str:
 def _is_dark_context(widget: QWidget) -> bool:
     win = widget.window()
     return getattr(win, "current_theme", "light") == "dark"
+
+
+def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
+    clamped = max(0.0, min(1.0, t))
+    return QColor(
+        int(round(c1.red() + (c2.red() - c1.red()) * clamped)),
+        int(round(c1.green() + (c2.green() - c1.green()) * clamped)),
+        int(round(c1.blue() + (c2.blue() - c1.blue()) * clamped)),
+        int(round(c1.alpha() + (c2.alpha() - c1.alpha()) * clamped)),
+    )
 
 
 class AppAvatarBadge(QLabel):
@@ -82,12 +108,44 @@ class AppAvatarBadge(QLabel):
 
 
 class ModernCheckBox(QCheckBox):
-    """Crisp custom-painted checkbox with vector checkmark for both light and dark themes."""
+    """Crisp custom-painted checkbox with smooth animated fill and vector checkmark."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(22, 22)
+        self._check_progress: float = 0.0
+        self._anim = QPropertyAnimation(self, b"check_progress", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.toggled.connect(self._on_toggled)
+
+    def _get_check_progress(self) -> float:
+        return self._check_progress
+
+    def _set_check_progress(self, value: float) -> None:
+        self._check_progress = value
+        self.update()
+
+    check_progress = Property(float, _get_check_progress, _set_check_progress)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._anim.stop()
+        if not self.isVisible():
+            self._check_progress = 1.0 if checked else 0.0
+            self.update()
+            return
+        self._anim.setStartValue(self._check_progress)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def setChecked(self, checked: bool) -> None:  # type: ignore[override]
+        was_checked = self.isChecked()
+        super().setChecked(checked)
+        if not self.isVisible() or self.signalsBlocked() or was_checked == checked:
+            self._anim.stop()
+            self._check_progress = 1.0 if checked else 0.0
+            self.update()
 
     def sizeHint(self) -> QSize:
         return QSize(22, 22)
@@ -98,7 +156,19 @@ class ModernCheckBox(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         rect = QRectF(2.0, 2.0, 18.0, 18.0)
-        if self.isChecked():
+        p = max(0.0, min(1.0, self._check_progress))
+
+        # Unchecked base box
+        border_color = tokens["checkbox_hover"] if self.underMouse() else tokens["checkbox_border"]
+        pen = QPen(QColor(border_color))
+        pen.setWidthF(1.6)
+        painter.setPen(pen)
+        painter.setBrush(QColor(tokens["checkbox_bg"]))
+        painter.drawRoundedRect(rect, 5.5, 5.5)
+
+        if p > 0.01:
+            painter.save()
+            painter.setOpacity(p)
             grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
             grad.setColorAt(0.0, QColor(tokens["primary"]))
             grad.setColorAt(1.0, QColor(tokens["primary_end"]))
@@ -106,38 +176,46 @@ class ModernCheckBox(QCheckBox):
             painter.setBrush(grad)
             painter.drawRoundedRect(rect, 5.5, 5.5)
 
-            pen = QPen(QColor("#ffffff"))
-            pen.setWidthF(2.1)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
+            # Progressive vector checkmark draw
+            check_pen = QPen(QColor("#ffffff"))
+            check_pen.setWidthF(2.1)
+            check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(check_pen)
+
+            p0 = QPointF(6.3, 11.2)
+            p1 = QPointF(9.5, 14.3)
+            p2 = QPointF(15.7, 7.7)
             path = QPainterPath()
-            path.moveTo(QPointF(6.3, 11.2))
-            path.lineTo(QPointF(9.5, 14.3))
-            path.lineTo(QPointF(15.7, 7.7))
+            path.moveTo(p0)
+            if p <= 0.45:
+                t1 = p / 0.45
+                path.lineTo(
+                    QPointF(p0.x() + (p1.x() - p0.x()) * t1, p0.y() + (p1.y() - p0.y()) * t1)
+                )
+            else:
+                path.lineTo(p1)
+                t2 = (p - 0.45) / 0.55
+                path.lineTo(
+                    QPointF(p1.x() + (p2.x() - p1.x()) * t2, p1.y() + (p2.y() - p1.y()) * t2)
+                )
             painter.drawPath(path)
-        else:
-            border_color = tokens["checkbox_hover"] if self.underMouse() else tokens["checkbox_border"]
-            pen = QPen(QColor(border_color))
-            pen.setWidthF(1.6)
-            painter.setPen(pen)
-            painter.setBrush(QColor(tokens["checkbox_bg"]))
-            painter.drawRoundedRect(rect, 5.5, 5.5)
+            painter.restore()
 
         painter.end()
 
 
 class ModernToggleSwitch(QCheckBox):
-    """Smooth animated pill toggle switch (used for the Light/Dark theme switcher)."""
+    """Silky-smooth animated pill toggle switch with gradual track color morphing."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(44, 24)
+        self.setFixedSize(46, 24)
         self._thumb_pos: float = 0.0
         self._anim = QPropertyAnimation(self, b"thumb_position", self)
-        self._anim.setDuration(150)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setDuration(320)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self.toggled.connect(self._animate_thumb)
 
     def _get_thumb_position(self) -> float:
@@ -151,15 +229,23 @@ class ModernToggleSwitch(QCheckBox):
 
     def _animate_thumb(self, checked: bool) -> None:
         self._anim.stop()
+        if not self.isVisible():
+            self._thumb_pos = 1.0 if checked else 0.0
+            self.update()
+            return
         self._anim.setStartValue(self._thumb_pos)
         self._anim.setEndValue(1.0 if checked else 0.0)
-        self._anim.start()
+        QTimer.singleShot(0, self._anim.start)
 
     def setChecked(self, checked: bool) -> None:  # type: ignore[override]
+        was_checked = self.isChecked()
         super().setChecked(checked)
-        self._anim.stop()
-        self._thumb_pos = 1.0 if checked else 0.0
-        self.update()
+        if not self.isVisible() or self.signalsBlocked():
+            self._anim.stop()
+            self._thumb_pos = 1.0 if checked else 0.0
+            self.update()
+        elif was_checked == checked:
+            return
 
     def hitButton(self, pos) -> bool:  # type: ignore[override]
         return self.rect().contains(pos)
@@ -173,29 +259,381 @@ class ModernToggleSwitch(QCheckBox):
         radius = track_rect.height() / 2.0
         painter.setPen(Qt.PenStyle.NoPen)
 
-        if self.isChecked():
-            grad = QLinearGradient(track_rect.topLeft(), track_rect.topRight())
-            grad.setColorAt(0.0, QColor(tokens["primary"]))
-            grad.setColorAt(1.0, QColor(tokens["primary_end"]))
-            painter.setBrush(grad)
-        else:
-            painter.setBrush(QColor(tokens["switch_track_off"]))
+        t = max(0.0, min(1.0, self._thumb_pos))
+        off_col = QColor(tokens["switch_track_off"])
+        grad = QLinearGradient(track_rect.topLeft(), track_rect.topRight())
+        grad.setColorAt(0.0, _lerp_color(off_col, QColor(tokens["primary"]), t))
+        grad.setColorAt(1.0, _lerp_color(off_col, QColor(tokens["primary_end"]), t))
+        painter.setBrush(grad)
         painter.drawRoundedRect(track_rect, radius, radius)
 
+        # Gentle organic pill glide without abrupt overshoot
         margin = 3.0
-        thumb_d = track_rect.height() - margin * 2.0
+        thumb_h = track_rect.height() - margin * 2.0
+        stretch = math.sin(t * math.pi) * 1.8
+        thumb_w = thumb_h + stretch
         min_x = track_rect.left() + margin
-        max_x = track_rect.right() - margin - thumb_d
-        x = min_x + (max_x - min_x) * self._thumb_pos
-        thumb_rect = QRectF(x, track_rect.top() + margin, thumb_d, thumb_d)
+        max_x = track_rect.right() - margin - thumb_w
+        x = min_x + (max_x - min_x) * t
+        thumb_rect = QRectF(x, track_rect.top() + margin, thumb_w, thumb_h)
 
         painter.setBrush(QColor(tokens["switch_thumb"]))
-        painter.drawEllipse(thumb_rect)
+        painter.drawRoundedRect(thumb_rect, thumb_h / 2.0, thumb_h / 2.0)
         painter.end()
 
 
+class AnimatedChevronButton(QPushButton):
+    """Expand/collapse button whose chevron smoothly rotates 180°."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ExpandButton")
+        self.setFixedSize(36, 36)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rotation: float = 0.0
+        self._chevron_color: str = "#3d355e"
+        self._anim = QPropertyAnimation(self, b"rotation_angle", self)
+        self._anim.setDuration(360)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+    def _get_rotation(self) -> float:
+        return self._rotation
+
+    def _set_rotation(self, angle: float) -> None:
+        self._rotation = angle
+        self.update()
+
+    rotation_angle = Property(float, _get_rotation, _set_rotation)
+
+    def set_chevron_color(self, color: str) -> None:
+        self._chevron_color = color
+        self.update()
+
+    def set_expanded(self, expanded: bool, animate: bool = True) -> None:
+        target = 180.0 if expanded else 0.0
+        self._anim.stop()
+        if animate and self.isVisible():
+            self._anim.setStartValue(self._rotation)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._rotation = target
+            self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        painter.rotate(self._rotation)
+
+        pen = QPen(QColor(self._chevron_color))
+        pen.setWidthF(1.9)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(-4.5, -2.0), QPointF(0.0, 2.5))
+        painter.drawLine(QPointF(0.0, 2.5), QPointF(4.5, -2.0))
+        painter.end()
+
+
+class NotificationBellButton(QPushButton):
+    """Top-bar notification bell icon button with ring wiggle animation and unread badge."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("IconButton")
+        self.setFixedSize(36, 36)
+        self.setIconSize(QSize(18, 18))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Notifiche")
+        self._unread_count: int = 0
+        self._bell_color: str = "#3d355e"
+        self._ring_angle: float = 0.0
+        self._badge_scale: float = 1.0
+        self._ring_group: Optional[QSequentialAnimationGroup] = None
+        self._badge_anim = QPropertyAnimation(self, b"badge_scale", self)
+        self._badge_anim.setDuration(300)
+        self._badge_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_ring_angle(self) -> float:
+        return self._ring_angle
+
+    def _set_ring_angle(self, angle: float) -> None:
+        self._ring_angle = angle
+        self.update()
+
+    ring_angle = Property(float, _get_ring_angle, _set_ring_angle)
+
+    def _get_badge_scale(self) -> float:
+        return self._badge_scale
+
+    def _set_badge_scale(self, scale: float) -> None:
+        self._badge_scale = scale
+        self.update()
+
+    badge_scale = Property(float, _get_badge_scale, _set_badge_scale)
+
+    def set_bell_color(self, color: str) -> None:
+        self._bell_color = color
+        self.update()
+
+    @property
+    def unread_count(self) -> int:
+        return self._unread_count
+
+    def set_unread_count(self, count: int) -> None:
+        previous = self._unread_count
+        self._unread_count = max(0, count)
+        self.setToolTip(
+            f"Notifiche ({self._unread_count} non lette)" if self._unread_count else "Notifiche"
+        )
+        if self._unread_count > previous and self.isVisible():
+            self.trigger_ring_animation()
+        else:
+            self._badge_scale = 1.0
+            self.update()
+
+    def trigger_ring_animation(self) -> None:
+        if self._ring_group is not None:
+            self._ring_group.stop()
+        seq = QSequentialAnimationGroup(self)
+        for target, ms in ((11.0, 95), (-9.0, 105), (6.0, 100), (-3.0, 90), (0.0, 85)):
+            step = QPropertyAnimation(self, b"ring_angle", seq)
+            step.setDuration(ms)
+            step.setEndValue(target)
+            step.setEasingCurve(QEasingCurve.Type.InOutSine)
+            seq.addAnimation(step)
+        self._ring_group = seq
+        seq.start()
+
+        self._badge_anim.stop()
+        self._badge_anim.setStartValue(0.55)
+        self._badge_anim.setEndValue(1.0)
+        self._badge_anim.start()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Draw crisp vector bell rotated around top pivot for subtle ring animation
+        painter.save()
+        painter.translate(self.width() / 2.0, self.height() / 2.0 - 5.0)
+        painter.rotate(self._ring_angle)
+        painter.translate(-9.0, -4.0)
+
+        pen = QPen(QColor(self._bell_color))
+        pen.setWidthF(1.7)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        cx = 9.0
+        painter.drawLine(QPointF(cx, 2.2), QPointF(cx, 3.6))
+        path = QPainterPath()
+        path.moveTo(4.0, 12.8)
+        path.cubicTo(4.8, 11.4, 5.0, 9.6, 5.0, 7.6)
+        path.cubicTo(5.0, 4.9, 6.8, 3.6, cx, 3.6)
+        path.cubicTo(11.2, 3.6, 13.0, 4.9, 13.0, 7.6)
+        path.cubicTo(13.0, 9.6, 13.2, 11.4, 14.0, 12.8)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawArc(QRectF(cx - 2.0, 12.4, 4.0, 3.2), 190 * 16, 160 * 16)
+        painter.restore()
+
+        if self._unread_count <= 0:
+            painter.end()
+            return
+
+        text = "9+" if self._unread_count > 9 else str(self._unread_count)
+        badge_w = 18.0 if len(text) > 1 else 15.0
+        badge_h = 15.0
+        cx_b = self.width() - badge_w / 2.0 - 1.5
+        cy_b = 1.5 + badge_h / 2.0
+
+        painter.save()
+        painter.translate(cx_b, cy_b)
+        scale = max(0.2, min(1.25, self._badge_scale))
+        painter.scale(scale, scale)
+        rect = QRectF(-badge_w / 2.0, -badge_h / 2.0, badge_w, badge_h)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#e83061"))
+        painter.drawRoundedRect(rect, badge_h / 2.0, badge_h / 2.0)
+
+        font = QFont(self.font())
+        font.setPixelSize(9)
+        font.setWeight(QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+        painter.end()
+
+
+class NotificationsPopover(QFrame):
+    """Floating notification center panel with smooth slide-down reveal."""
+
+    def __init__(
+        self,
+        on_clear: Callable[[], None],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("NotificationsPopover")
+        self.setFixedWidth(380)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 10)
+        shadow.setColor(QColor(14, 11, 29, 85))
+        self.setGraphicsEffect(shadow)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title = QLabel("Notifiche")
+        title.setObjectName("SectionTitle")
+        self.count_badge = QLabel("0")
+        self.count_badge.setObjectName("StatChip")
+
+        self.clear_btn = QPushButton("Pulisci")
+        self.clear_btn.setObjectName("GhostLinkButton")
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.clicked.connect(on_clear)
+
+        self.close_btn = QPushButton("×")
+        self.close_btn.setObjectName("ToastCloseButton")
+        self.close_btn.setFixedSize(26, 26)
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.setToolTip("Chiudi notifiche")
+        self.close_btn.clicked.connect(self.hide)
+
+        header.addWidget(title)
+        header.addWidget(self.count_badge)
+        header.addStretch()
+        header.addWidget(self.clear_btn)
+        header.addWidget(self.close_btn)
+        root.addLayout(header)
+
+        divider = QFrame()
+        divider.setObjectName("SidebarDivider")
+        root.addWidget(divider)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setMaximumHeight(340)
+        self.list_container = QWidget()
+        self.list_layout = QVBoxLayout(self.list_container)
+        self.list_layout.setContentsMargins(0, 2, 4, 2)
+        self.list_layout.setSpacing(8)
+        self.scroll.setWidget(self.list_container)
+        root.addWidget(self.scroll)
+
+        self._slide_anim = QPropertyAnimation(self, b"pos", self)
+        self._slide_anim.setDuration(290)
+        self._slide_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+
+        self._items: list[NotificationItem] = []
+        self.set_notifications([])
+        self.hide()
+
+    def animate_open(self, target_pos: QPoint) -> None:
+        self._slide_anim.stop()
+        parent = self.parentWidget()
+        if parent is not None and parent.isVisible():
+            self.move(QPoint(target_pos.x(), max(6, target_pos.y() - 16)))
+            self.show()
+            self.raise_()
+            self._slide_anim.setStartValue(self.pos())
+            self._slide_anim.setEndValue(target_pos)
+            QTimer.singleShot(0, self._slide_anim.start)
+        else:
+            self.move(target_pos)
+            self.show()
+            self.raise_()
+
+    def set_notifications(self, items: Sequence[NotificationItem]) -> None:
+        self._items = list(items)
+        self.count_badge.setText(str(len(self._items)))
+        self.clear_btn.setEnabled(bool(self._items))
+
+        while self.list_layout.count():
+            child = self.list_layout.takeAt(0)
+            widget = child.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+
+        if not self._items:
+            empty = QLabel("Nessuna notifica in questa sessione.")
+            empty.setObjectName("MutedText")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setContentsMargins(12, 26, 12, 26)
+            self.list_layout.addWidget(empty)
+            self.scroll.setFixedHeight(90)
+        else:
+            for item in self._items:
+                self.list_layout.addWidget(self._build_row(item))
+            desired_h = min(320, max(96, len(self._items) * 82 + 12))
+            self.scroll.setFixedHeight(desired_h)
+
+        self.list_layout.addStretch()
+        self.adjustSize()
+
+    @staticmethod
+    def _build_row(item: NotificationItem) -> QFrame:
+        normalized = "success" if item.level == "success" else "warning"
+        row = QFrame()
+        row.setObjectName("NotificationRow")
+        row.setProperty("level", normalized)
+
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        icon = QLabel("✓" if normalized == "success" else "!")
+        icon.setObjectName("ToastIcon")
+        icon.setProperty("level", normalized)
+        icon.setFixedSize(22, 22)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        title_lbl = QLabel(item.title)
+        title_lbl.setObjectName("BannerTitle")
+        time_lbl = QLabel(item.timestamp)
+        time_lbl.setObjectName("MutedText")
+        top.addWidget(title_lbl, stretch=1)
+        top.addWidget(time_lbl)
+
+        msg_lbl = QLabel(item.message)
+        msg_lbl.setObjectName("MutedText")
+        msg_lbl.setWordWrap(True)
+
+        col.addLayout(top)
+        col.addWidget(msg_lbl)
+
+        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(col, stretch=1)
+        return row
+
+    def refresh_style(self) -> None:
+        self.set_notifications(self._items)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
 class StatusNotificationBanner(QFrame):
-    """Floating top-of-screen toast notification for update success or warning states."""
+    """Discreet bottom-right toast notification with smooth slide-in entrance."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -205,7 +643,7 @@ class StatusNotificationBanner(QFrame):
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(28)
         shadow.setOffset(0, 8)
-        shadow.setColor(QColor(15, 23, 42, 60))
+        shadow.setColor(QColor(15, 23, 42, 65))
         self.setGraphicsEffect(shadow)
 
         layout = QHBoxLayout(self)
@@ -238,9 +676,13 @@ class StatusNotificationBanner(QFrame):
         layout.addLayout(text_col, stretch=1)
         layout.addWidget(self.close_btn, alignment=Qt.AlignmentFlag.AlignTop)
 
+        self._slide_anim = QPropertyAnimation(self, b"pos", self)
+        self._slide_anim.setDuration(330)
+        self._slide_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self.hide)
+        self._hide_timer.timeout.connect(self.dismiss)
 
         self.hide()
 
@@ -253,6 +695,19 @@ class StatusNotificationBanner(QFrame):
             widget.setProperty("level", self._level)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def slide_to(self, target_pos: QPoint, animate: bool = True) -> None:
+        self._slide_anim.stop()
+        parent = self.parentWidget()
+        if animate and parent is not None and parent.isVisible():
+            start_pos = QPoint(target_pos.x() + 36, target_pos.y())
+            self.move(start_pos)
+            self._slide_anim.setStartValue(start_pos)
+            self._slide_anim.setEndValue(target_pos)
+            QTimer.singleShot(0, self._slide_anim.start)
+        else:
+            self.move(target_pos)
+        self.raise_()
 
     def show_message(
         self,
@@ -271,18 +726,19 @@ class StatusNotificationBanner(QFrame):
         self.show()
         self.raise_()
 
-        timeout = duration_ms if duration_ms is not None else (6000 if normalized == "success" else 9000)
+        timeout = duration_ms if duration_ms is not None else (4500 if normalized == "success" else 7000)
         self._hide_timer.stop()
         if timeout > 0:
             self._hide_timer.start(timeout)
 
     def dismiss(self) -> None:
         self._hide_timer.stop()
+        self._slide_anim.stop()
         self.hide()
 
 
 class ActiveDownloadBanner(QFrame):
-    """Displays the currently updating app, phase, speed, ETA, and intuitive progress bar."""
+    """Standalone download progress section with smooth bar animation, visible only when active."""
 
     IDLE_TITLE = "Nessun download attivo"
     IDLE_DETAIL = (
@@ -300,7 +756,7 @@ class ActiveDownloadBanner(QFrame):
         self._paused = False
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(18, 15, 18, 15)
         layout.setSpacing(16)
 
         left_col = QVBoxLayout()
@@ -332,6 +788,15 @@ class ActiveDownloadBanner(QFrame):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedWidth(220)
 
+        self._bar_anim = QPropertyAnimation(self.progress_bar, b"value", self)
+        self._bar_anim.setDuration(420)
+        self._bar_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._reveal_anim = QPropertyAnimation(self, b"maximumHeight", self)
+        self._reveal_anim.setDuration(340)
+        self._reveal_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._reveal_anim.finished.connect(self._on_reveal_finished)
+
         self.pause_btn = QPushButton("Pausa")
         self.pause_btn.setObjectName("SecondaryButton")
         self.pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -351,9 +816,19 @@ class ActiveDownloadBanner(QFrame):
         layout.addLayout(left_col, stretch=1)
         layout.addLayout(right_col)
 
+        # Hidden by default — displayed only while a download/update is running
+        self.hide()
+
+    def _on_reveal_finished(self) -> None:
+        if self.isVisible():
+            self.setMaximumHeight(16777215)
+
     def reset(self) -> None:
-        """Clear any completed or failed item from the active download section."""
+        """Clear any completed or failed item and hide the download section."""
         self._paused = False
+        self._bar_anim.stop()
+        self._reveal_anim.stop()
+        self.setMaximumHeight(16777215)
         self.title_label.setText(self.IDLE_TITLE)
         self.percent_label.setText("0%")
         self.progress_bar.setValue(0)
@@ -361,6 +836,7 @@ class ActiveDownloadBanner(QFrame):
         self.pause_btn.setText("Pausa")
         self.pause_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
+        self.hide()
 
     def update_progress(self, progress: DownloadProgress) -> None:
         if progress.phase in (
@@ -372,6 +848,7 @@ class ActiveDownloadBanner(QFrame):
             self.reset()
             return
 
+        was_hidden = self.isHidden()
         is_active = progress.phase in (
             UpdatePhase.DOWNLOADING,
             UpdatePhase.VERIFYING,
@@ -393,8 +870,8 @@ class ActiveDownloadBanner(QFrame):
         }
         prefix = phase_labels.get(progress.phase, "Stato")
         self.title_label.setText(f"{prefix}: {progress.app_name}")
-        self.percent_label.setText(f"{int(round(progress.percent))}%")
-        self.progress_bar.setValue(int(round(progress.percent)))
+        target_pct = max(0, min(100, int(round(progress.percent))))
+        self.percent_label.setText(f"{target_pct}%")
 
         metrics = []
         if progress.total_mb > 0:
@@ -406,6 +883,28 @@ class ActiveDownloadBanner(QFrame):
 
         suffix = f" ({' · '.join(metrics)})" if metrics else ""
         self.detail_label.setText(f"{progress.message}{suffix}")
+
+        parent = self.parentWidget()
+        if was_hidden and parent is not None and parent.isVisible():
+            self._reveal_anim.stop()
+            self.setMaximumHeight(16777215)
+            target_h = max(76, self.sizeHint().height())
+            self.setMaximumHeight(0)
+            self.show()
+            self._reveal_anim.setStartValue(0)
+            self._reveal_anim.setEndValue(target_h)
+            self._reveal_anim.start()
+            self.progress_bar.setValue(target_pct)
+        else:
+            self.show()
+            if self.isVisible() and not was_hidden and self.progress_bar.value() != target_pct:
+                self._bar_anim.stop()
+                self._bar_anim.setStartValue(self.progress_bar.value())
+                self._bar_anim.setEndValue(target_pct)
+                self._bar_anim.start()
+            else:
+                self._bar_anim.stop()
+                self.progress_bar.setValue(target_pct)
 
 
 class AppUpdateCard(QFrame):
@@ -423,7 +922,7 @@ class AppUpdateCard(QFrame):
         self.candidate = candidate
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(18, 15, 18, 15)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(14)
 
         self.checkbox = ModernCheckBox()
@@ -495,12 +994,15 @@ class AppUpdateCard(QFrame):
         if phase in (UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING, UpdatePhase.INSTALLING):
             self.update_btn.setEnabled(False)
             self.update_btn.setText("In corso...")
+            self.checkbox.setEnabled(False)
         elif phase == UpdatePhase.COMPLETED:
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Aggiornato")
+            self.checkbox.setEnabled(False)
         else:
             self.update_btn.setEnabled(True)
             self.update_btn.setText("Aggiorna Ora")
+            self.checkbox.setEnabled(True)
 
 
 class HistoryRowWidget(QFrame):

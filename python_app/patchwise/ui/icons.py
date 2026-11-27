@@ -202,3 +202,44 @@ def make_theme_icon(color: str, dark_mode: bool, size: int = 16) -> QIcon:
             )
     painter.end()
     return QIcon(pixmap)
+
+
+def make_bell_icon(color: str, size: int = 18) -> QIcon:
+    """Draw a sleek notification bell vector icon."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 1.7))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    cx = size / 2.0
+    # Top stem
+    painter.drawLine(QPointF(cx, 2.2), QPointF(cx, 3.6))
+    # Bell dome
+    path = QPainterPath()
+    path.moveTo(4.0, 12.8)
+    path.cubicTo(4.8, 11.4, 5.0, 9.6, 5.0, 7.6)
+    path.cubicTo(5.0, 4.9, 6.8, 3.6, cx, 3.6)
+    path.cubicTo(11.2, 3.6, 13.0, 4.9, 13.0, 7.6)
+    path.cubicTo(13.0, 9.6, 13.2, 11.4, 14.0, 12.8)
+    path.closeSubpath()
+    painter.drawPath(path)
+
+    # Bottom clapper arc
+    painter.drawArc(QRectF(cx - 2.0, 12.4, 4.0, 3.2), 190 * 16, 160 * 16)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_chevron_icon(color: str, expanded: bool = False, size: int = 16) -> QIcon:
+    """Draw an expand (down) or collapse (up) chevron vector icon."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 1.9))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    if expanded:
+        painter.drawLine(QPointF(4.0, 10.2), QPointF(size / 2.0, 5.8))
+        painter.drawLine(QPointF(size / 2.0, 5.8), QPointF(size - 4.0, 10.2))
+    else:
+        painter.drawLine(QPointF(4.0, 5.8), QPointF(size / 2.0, 10.2))
+        painter.drawLine(QPointF(size / 2.0, 10.2), QPointF(size - 4.0, 5.8))
+    painter.end()
+    return QIcon(pixmap)

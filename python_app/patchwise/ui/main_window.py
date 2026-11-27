@@ -7,15 +7,18 @@ import sys
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import (
+    Property,
     QEasingCurve,
-    QParallelAnimationGroup,
+    QPoint,
     QPropertyAnimation,
     QSize,
     Qt,
+    QTimer,
 )
-from PySide6.QtGui import QCloseEvent, QResizeEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,9 +46,13 @@ from patchwise.ui.icons import (
 from patchwise.ui.theme import get_theme_qss, get_theme_tokens
 from patchwise.ui.widgets import (
     ActiveDownloadBanner,
+    AnimatedChevronButton,
     AppUpdateCard,
     HistoryRowWidget,
     ModernToggleSwitch,
+    NotificationBellButton,
+    NotificationItem,
+    NotificationsPopover,
     StatusNotificationBanner,
 )
 from patchwise.ui.workers import ScanWorker, UpdateWorker
@@ -55,6 +62,7 @@ class PatchWiseMainWindow(QMainWindow):
     """Primary PySide6 desktop shell coordinating scan, updates, progress, and session history."""
 
     SIDEBAR_WIDTH = 268
+    MAX_NOTIFICATIONS = 50
 
     def __init__(self, controller: Optional[UpdateManagerController] = None) -> None:
         super().__init__()
@@ -65,7 +73,13 @@ class PatchWiseMainWindow(QMainWindow):
         self._pending_rescan: bool = False
         self._theme: str = "light"
         self._sidebar_open: bool = True
-        self._sidebar_anim: Optional[QParallelAnimationGroup] = None
+        self._updates_expanded: bool = False
+        self._sidebar_anim: Optional[QPropertyAnimation] = None
+        self._updates_anim: Optional[QPropertyAnimation] = None
+        self._page_fade_anim: Optional[QPropertyAnimation] = None
+        self._theme_fade_overlay: Optional[QLabel] = None
+        self._theme_fade_anim: Optional[QPropertyAnimation] = None
+        self._notifications: List[NotificationItem] = []
 
         self.setWindowTitle(f"PatchWise Desktop — Software Updater v{__version__} (Portable)")
         self.setWindowIcon(load_app_icon())
@@ -73,9 +87,14 @@ class PatchWiseMainWindow(QMainWindow):
 
         self._build_layout()
         self.notification_banner = StatusNotificationBanner(self)
-        self.set_theme("light")
+        self.notifications_popover = NotificationsPopover(
+            on_clear=self.clear_notifications,
+            parent=self,
+        )
+        self.set_theme("light", animate=False)
         self._refresh_history_views()
         self._refresh_summary_chips()
+        self._refresh_selection_controls()
 
     @property
     def current_theme(self) -> str:
@@ -85,6 +104,14 @@ class PatchWiseMainWindow(QMainWindow):
     def is_sidebar_open(self) -> bool:
         return self._sidebar_open
 
+    @property
+    def is_updates_expanded(self) -> bool:
+        return self._updates_expanded
+
+    @property
+    def notification_items(self) -> List[NotificationItem]:
+        return list(self._notifications)
+
     def _build_layout(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -92,12 +119,20 @@ class PatchWiseMainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Collapsible sidebar navigation
+        # Collapsible sidebar navigation with fixed-width inner content (zero reflow/squish)
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setMinimumWidth(self.SIDEBAR_WIDTH)
-        self.sidebar.setMaximumWidth(self.SIDEBAR_WIDTH)
-        sb_layout = QVBoxLayout(self.sidebar)
+        self.sidebar.setFixedWidth(self.SIDEBAR_WIDTH)
+        sidebar_clip_layout = QHBoxLayout(self.sidebar)
+        sidebar_clip_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_clip_layout.setSpacing(0)
+
+        self._sidebar_content = QWidget()
+        self._sidebar_content.setObjectName("TransparentContainer")
+        self._sidebar_content.setFixedWidth(self.SIDEBAR_WIDTH)
+        sidebar_clip_layout.addWidget(self._sidebar_content, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        sb_layout = QVBoxLayout(self._sidebar_content)
         sb_layout.setContentsMargins(16, 20, 16, 18)
         sb_layout.setSpacing(10)
 
@@ -214,8 +249,8 @@ class PatchWiseMainWindow(QMainWindow):
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("Cerca programmi installati o aggiornamenti...")
-        self.search_input.setMinimumWidth(260)
-        self.search_input.setMaximumWidth(420)
+        self.search_input.setMinimumWidth(240)
+        self.search_input.setMaximumWidth(400)
         self.search_input.textChanged.connect(self._render_candidates)
 
         self.scan_btn = QPushButton("Nuova Scansione")
@@ -224,11 +259,14 @@ class PatchWiseMainWindow(QMainWindow):
         self.scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.scan_btn.clicked.connect(self.start_scan)
 
-        self.update_all_btn = QPushButton("Aggiorna Selezionate")
+        self.update_all_btn = QPushButton("Aggiorna selezionate")
         self.update_all_btn.setObjectName("PrimaryButton")
         self.update_all_btn.setIconSize(QSize(15, 15))
         self.update_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_all_btn.clicked.connect(self.start_batch_update)
+
+        self.notifications_btn = NotificationBellButton()
+        self.notifications_btn.clicked.connect(self.toggle_notifications_panel)
 
         layout.addWidget(self.sidebar_toggle_btn)
         layout.addWidget(self.topbar_logo)
@@ -237,6 +275,7 @@ class PatchWiseMainWindow(QMainWindow):
         layout.addWidget(self.search_input, stretch=1)
         layout.addWidget(self.scan_btn)
         layout.addWidget(self.update_all_btn)
+        layout.addWidget(self.notifications_btn)
         return bar
 
     def _make_nav_button(self, text: str, page_index: int, active: bool) -> QPushButton:
@@ -249,6 +288,7 @@ class PatchWiseMainWindow(QMainWindow):
         return btn
 
     def _switch_page(self, index: int) -> None:
+        previous = self.stack.currentIndex()
         self.stack.setCurrentIndex(index)
         for idx, btn in enumerate((self.nav_dashboard, self.nav_history)):
             btn.setProperty("active", idx == index)
@@ -267,6 +307,41 @@ class PatchWiseMainWindow(QMainWindow):
         if index == 1:
             self._refresh_history_views()
 
+        if previous != index and self.isVisible():
+            self._animate_page_fade(self.stack.currentWidget())
+
+    def _animate_page_fade(self, page: Optional[QWidget]) -> None:
+        if page is None:
+            return
+        if self._page_fade_anim is not None:
+            self._page_fade_anim.stop()
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(280)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        anim.finished.connect(lambda p=page: p.setGraphicsEffect(None))
+        self._page_fade_anim = anim
+        QTimer.singleShot(0, anim.start)
+
+    def _get_sidebar_width(self) -> int:
+        return self.sidebar.maximumWidth()
+
+    def _set_sidebar_width(self, width: int) -> None:
+        clamped = max(0, int(width))
+        self.sidebar.setFixedWidth(clamped)
+        if (
+            (hasattr(self, "notification_banner") and self.notification_banner.isVisible())
+            or (hasattr(self, "notifications_popover") and self.notifications_popover.isVisible())
+        ):
+            self._reposition_overlays()
+
+    sidebar_width = Property(int, _get_sidebar_width, _set_sidebar_width)
+
     def toggle_sidebar(self, animate: bool = True) -> None:
         self.set_sidebar_open(not self._sidebar_open, animate=animate)
 
@@ -281,23 +356,17 @@ class PatchWiseMainWindow(QMainWindow):
         if self._sidebar_anim is not None:
             self._sidebar_anim.stop()
 
-        if animate:
-            group = QParallelAnimationGroup(self)
-            for prop in (b"minimumWidth", b"maximumWidth"):
-                anim = QPropertyAnimation(self.sidebar, prop, group)
-                anim.setDuration(200)
-                anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                anim.setStartValue(self.sidebar.width())
-                anim.setEndValue(target_w)
-                if prop == b"maximumWidth":
-                    anim.valueChanged.connect(self._on_sidebar_anim_step)
-                group.addAnimation(anim)
-            self._sidebar_anim = group
-            group.start()
+        if animate and self.isVisible():
+            anim = QPropertyAnimation(self, b"sidebar_width", self)
+            anim.setDuration(340)
+            anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+            anim.setStartValue(self.sidebar.width())
+            anim.setEndValue(target_w)
+            self._sidebar_anim = anim
+            QTimer.singleShot(0, anim.start)
         else:
-            self.sidebar.setMinimumWidth(target_w)
-            self.sidebar.setMaximumWidth(target_w)
-            self._on_sidebar_anim_step()
+            self.sidebar.setFixedWidth(target_w)
+            self._reposition_overlays()
 
         self.topbar_logo.setVisible(not self._sidebar_open)
         self.sidebar_toggle_btn.setToolTip(
@@ -305,20 +374,129 @@ class PatchWiseMainWindow(QMainWindow):
         )
         self._refresh_icons()
 
-    def _on_sidebar_anim_step(self) -> None:
-        if hasattr(self, "notification_banner") and self.notification_banner.isVisible():
-            self._position_notification()
+    def toggle_updates_list(self) -> None:
+        self.set_updates_expanded(not self._updates_expanded, animate=True)
+
+    def set_updates_expanded(self, expanded: bool, animate: bool = True) -> None:
+        self._updates_expanded = expanded
+        use_anim = animate and self.isVisible()
+
+        if self._updates_anim is not None:
+            self._updates_anim.stop()
+
+        self.expand_updates_btn.set_expanded(expanded, animate=use_anim)
+        self.expand_updates_btn.setToolTip(
+            "Nascondi elenco applicazioni" if expanded else "Espandi elenco applicazioni"
+        )
+
+        if not use_anim:
+            self.updates_body.setMaximumHeight(16777215)
+            self.updates_body.setVisible(expanded)
+            self._dashboard_spacer.setVisible(not expanded)
+            self.dashboard_layout.setStretchFactor(self.hero_card, 1 if expanded else 0)
+            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0 if expanded else 1)
+            self._reposition_overlays()
+            return
+
+        if expanded:
+            download_h = (
+                self.download_banner.height() + 16 if self.download_banner.isVisible() else 0
+            )
+            header_h = self.hero_header_widget.sizeHint().height()
+            # Match exact final height when hero_card switches to stretch=1 (zero end-jump)
+            target_h = max(220, self.stack.height() - 44 - header_h - 56 - download_h)
+            start_h = self.updates_body.height() if self.updates_body.isVisible() else 0
+
+            self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+            self._dashboard_spacer.setVisible(True)
+            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
+            self.updates_body.setMaximumHeight(start_h)
+            self.updates_body.setVisible(True)
+
+            anim = QPropertyAnimation(self.updates_body, b"maximumHeight", self)
+            anim.setDuration(380)
+            anim.setStartValue(start_h)
+            anim.setEndValue(target_h)
+            anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+            anim.finished.connect(self._on_updates_expand_finished)
+            self._updates_anim = anim
+            QTimer.singleShot(0, anim.start)
+        else:
+            start_h = self.updates_body.height() if self.updates_body.isVisible() else 0
+            if start_h <= 0:
+                self.updates_body.setVisible(False)
+                self.updates_body.setMaximumHeight(16777215)
+                self._dashboard_spacer.setVisible(True)
+                self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+                self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
+                self._reposition_overlays()
+                return
+
+            self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+            self._dashboard_spacer.setVisible(True)
+            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
+            self.updates_body.setMaximumHeight(start_h)
+
+            anim = QPropertyAnimation(self.updates_body, b"maximumHeight", self)
+            anim.setDuration(340)
+            anim.setStartValue(start_h)
+            anim.setEndValue(0)
+            anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+            anim.finished.connect(self._on_updates_collapse_finished)
+            self._updates_anim = anim
+            QTimer.singleShot(0, anim.start)
+
+    def _on_updates_expand_finished(self) -> None:
+        if not self._updates_expanded:
+            return
+        self.updates_body.setMaximumHeight(16777215)
+        self._dashboard_spacer.setVisible(False)
+        self.dashboard_layout.setStretchFactor(self.hero_card, 1)
+        self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0)
+        self._reposition_overlays()
+
+    def _on_updates_collapse_finished(self) -> None:
+        if self._updates_expanded:
+            return
+        self.updates_body.setVisible(False)
+        self.updates_body.setMaximumHeight(16777215)
+        self._dashboard_spacer.setVisible(True)
+        self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+        self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
+        self._reposition_overlays()
+
+    def toggle_notifications_panel(self) -> None:
+        if self.notifications_popover.isVisible():
+            self.notifications_popover.hide()
+        else:
+            self.notifications_btn.set_unread_count(0)
+            self.notifications_popover.set_notifications(self._notifications)
+            target = self._compute_notifications_popover_pos()
+            self.notifications_popover.animate_open(target)
+
+    def clear_notifications(self) -> None:
+        self._notifications.clear()
+        self.notifications_btn.set_unread_count(0)
+        self.notifications_popover.set_notifications(self._notifications)
+        if self.notifications_popover.isVisible():
+            self._position_notifications_popover()
 
     def _on_dark_theme_toggled(self, checked: bool) -> None:
-        self.set_theme("dark" if checked else "light")
+        self.set_theme("dark" if checked else "light", animate=True)
 
-    def set_theme(self, theme: str) -> None:
+    def set_theme(self, theme: str, animate: bool = False) -> None:
         normalized = "dark" if theme == "dark" else "light"
+        theme_changed = normalized != self._theme
         self._theme = normalized
 
-        self.dark_theme_toggle.blockSignals(True)
-        self.dark_theme_toggle.setChecked(normalized == "dark")
-        self.dark_theme_toggle.blockSignals(False)
+        if self.dark_theme_toggle.isChecked() != (normalized == "dark"):
+            self.dark_theme_toggle.blockSignals(True)
+            self.dark_theme_toggle.setChecked(normalized == "dark")
+            self.dark_theme_toggle.blockSignals(False)
+
+        snapshot = None
+        if animate and theme_changed and self.isVisible() and self.width() > 0 and self.height() > 0:
+            snapshot = self.grab()
 
         self.setStyleSheet(get_theme_qss(normalized))
         self._refresh_icons()
@@ -326,9 +504,51 @@ class PatchWiseMainWindow(QMainWindow):
 
         if hasattr(self, "notification_banner") and self.notification_banner.isVisible():
             self.notification_banner.refresh_style()
-            self._position_notification()
+        if hasattr(self, "notifications_popover"):
+            self.notifications_popover.refresh_style()
+        self._reposition_overlays()
+
+        if snapshot is not None:
+            self._play_theme_crossfade(snapshot)
 
         self.update()
+
+    def _play_theme_crossfade(self, old_snapshot) -> None:
+        """Crossfade smoothly from the previous theme snapshot into the new theme."""
+        if self._theme_fade_anim is not None:
+            self._theme_fade_anim.stop()
+        if self._theme_fade_overlay is not None:
+            self._theme_fade_overlay.hide()
+            self._theme_fade_overlay.deleteLater()
+            self._theme_fade_overlay = None
+
+        overlay = QLabel(self)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        overlay.setPixmap(old_snapshot)
+        overlay.setGeometry(self.rect())
+
+        effect = QGraphicsOpacityEffect(overlay)
+        effect.setOpacity(1.0)
+        overlay.setGraphicsEffect(effect)
+        overlay.show()
+        overlay.raise_()
+
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(380)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        anim.finished.connect(self._cleanup_theme_crossfade)
+
+        self._theme_fade_overlay = overlay
+        self._theme_fade_anim = anim
+        QTimer.singleShot(0, anim.start)
+
+    def _cleanup_theme_crossfade(self) -> None:
+        if self._theme_fade_overlay is not None:
+            self._theme_fade_overlay.hide()
+            self._theme_fade_overlay.deleteLater()
+            self._theme_fade_overlay = None
 
     def _refresh_icons(self) -> None:
         tokens = get_theme_tokens(self._theme)
@@ -339,6 +559,9 @@ class PatchWiseMainWindow(QMainWindow):
         self.sidebar_toggle_btn.setIcon(
             make_sidebar_toggle_icon(icon_default, sidebar_open=self._sidebar_open, size=18)
         )
+        self.notifications_btn.set_bell_color(icon_default)
+        self.expand_updates_btn.set_chevron_color(icon_default)
+
         is_dash = self.stack.currentIndex() == 0
         self.nav_dashboard.setIcon(
             make_dashboard_icon(icon_active if is_dash else icon_muted, size=16)
@@ -364,25 +587,27 @@ class PatchWiseMainWindow(QMainWindow):
             hwnd = int(self.winId())
             value = ctypes.c_int(1 if dark else 0)
             dwm = ctypes.windll.dwmapi  # type: ignore[attr-defined]
-            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 2004+ / Win11)
             dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
         except Exception:  # noqa: BLE001
             pass
 
     def _build_dashboard_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(26, 22, 26, 22)
-        layout.setSpacing(18)
+        self.dashboard_layout = QVBoxLayout(page)
+        self.dashboard_layout.setContentsMargins(26, 22, 26, 22)
+        self.dashboard_layout.setSpacing(16)
 
-        # Hero summary card
-        hero = QFrame()
-        hero.setObjectName("HeroCard")
-        hero_layout = QVBoxLayout(hero)
+        # Expandable updates summary card (collapsed by default until chevron is clicked)
+        self.hero_card = QFrame()
+        self.hero_card.setObjectName("HeroCard")
+        hero_layout = QVBoxLayout(self.hero_card)
         hero_layout.setContentsMargins(22, 20, 22, 20)
         hero_layout.setSpacing(14)
 
-        hero_header = QHBoxLayout()
+        self.hero_header_widget = QWidget()
+        self.hero_header_widget.setObjectName("TransparentContainer")
+        hero_header = QHBoxLayout(self.hero_header_widget)
+        hero_header.setContentsMargins(0, 0, 0, 0)
         hero_header.setSpacing(14)
 
         title_col = QVBoxLayout()
@@ -407,28 +632,67 @@ class PatchWiseMainWindow(QMainWindow):
         for chip in (self.chip_installed, self.chip_pending, self.chip_updated):
             chips_row.addWidget(chip, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        self.expand_updates_btn = AnimatedChevronButton()
+        self.expand_updates_btn.setToolTip("Espandi elenco applicazioni")
+        self.expand_updates_btn.clicked.connect(self.toggle_updates_list)
+
         hero_header.addLayout(title_col, stretch=1)
         hero_header.addLayout(chips_row)
+        hero_header.addWidget(self.expand_updates_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        hero_layout.addWidget(self.hero_header_widget)
 
+        # Collapsible body inside the summary card containing the scrollable apps list
+        self.updates_body = QWidget()
+        self.updates_body.setObjectName("TransparentContainer")
+        body_layout = QVBoxLayout(self.updates_body)
+        body_layout.setContentsMargins(0, 2, 0, 0)
+        body_layout.setSpacing(12)
+
+        body_divider = QFrame()
+        body_divider.setObjectName("SidebarDivider")
+        body_layout.addWidget(body_divider)
+
+        selection_row = QHBoxLayout()
+        selection_row.setSpacing(10)
+        self.select_all_btn = QPushButton("Seleziona tutto")
+        self.select_all_btn.setObjectName("CompactButton")
+        self.select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_btn.clicked.connect(self.toggle_select_all)
+
+        self.selection_summary_label = QLabel("")
+        self.selection_summary_label.setObjectName("MutedText")
+
+        selection_row.addWidget(self.select_all_btn)
+        selection_row.addWidget(self.selection_summary_label)
+        selection_row.addStretch()
+        body_layout.addLayout(selection_row)
+
+        self.updates_scroll = QScrollArea()
+        self.updates_scroll.setWidgetResizable(True)
+        self.updates_container = QWidget()
+        self.updates_layout = QVBoxLayout(self.updates_container)
+        self.updates_layout.setContentsMargins(0, 2, 4, 2)
+        self.updates_layout.setSpacing(10)
+        self.updates_layout.addStretch()
+        self.updates_scroll.setWidget(self.updates_container)
+        body_layout.addWidget(self.updates_scroll, stretch=1)
+
+        self.updates_body.setVisible(False)
+        hero_layout.addWidget(self.updates_body, stretch=1)
+
+        # Standalone active download section placed BELOW the updates card,
+        # visible ONLY while a download/update is in progress.
         self.download_banner = ActiveDownloadBanner(
             on_pause_toggle=self._toggle_pause,
             on_cancel=self._cancel_active_update,
         )
 
-        hero_layout.addLayout(hero_header)
-        hero_layout.addWidget(self.download_banner)
-        layout.addWidget(hero)
+        self._dashboard_spacer = QWidget()
+        self._dashboard_spacer.setObjectName("TransparentContainer")
 
-        # Scrollable updates list
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.updates_container = QWidget()
-        self.updates_layout = QVBoxLayout(self.updates_container)
-        self.updates_layout.setContentsMargins(0, 0, 4, 0)
-        self.updates_layout.setSpacing(10)
-        self.updates_layout.addStretch()
-        scroll.setWidget(self.updates_container)
-        layout.addWidget(scroll, stretch=1)
+        self.dashboard_layout.addWidget(self.hero_card, stretch=0)
+        self.dashboard_layout.addWidget(self.download_banner, stretch=0)
+        self.dashboard_layout.addWidget(self._dashboard_spacer, stretch=1)
 
         return page
 
@@ -492,6 +756,7 @@ class PatchWiseMainWindow(QMainWindow):
         )
         self._refresh_summary_chips()
         self._render_candidates()
+        self._refresh_selection_controls()
         if self._pending_rescan:
             self._pending_rescan = False
             self.start_scan()
@@ -508,8 +773,11 @@ class PatchWiseMainWindow(QMainWindow):
     def _render_candidates(self) -> None:
         while self.updates_layout.count():
             item = self.updates_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
 
         self._card_map.clear()
         query = self.search_input.text().strip().lower()
@@ -523,6 +791,7 @@ class PatchWiseMainWindow(QMainWindow):
             empty = QLabel("Nessun aggiornamento in sospeso corrispondente al filtro.")
             empty.setObjectName("MutedText")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setContentsMargins(0, 20, 0, 20)
             self.updates_layout.addWidget(empty)
         else:
             for candidate in visible:
@@ -537,19 +806,56 @@ class PatchWiseMainWindow(QMainWindow):
 
         self.updates_layout.addStretch()
 
-    @staticmethod
-    def _on_candidate_selected(candidate: UpdateCandidate, selected: bool) -> None:
+    def _actionable_candidates(self) -> List[UpdateCandidate]:
+        return [
+            c
+            for c in self.controller.candidates
+            if c.status != UpdatePhase.COMPLETED and not c.skipped
+        ]
+
+    def _refresh_selection_controls(self) -> None:
+        actionable = self._actionable_candidates()
+        total = len(actionable)
+        selected_count = sum(1 for c in actionable if c.selected)
+        all_selected = total > 0 and selected_count == total
+        is_updating = bool(self._update_worker and self._update_worker.isRunning())
+
+        self.select_all_btn.setText("Deseleziona tutto" if all_selected else "Seleziona tutto")
+        self.select_all_btn.setEnabled(total > 0 and not is_updating)
+
+        if total == 0:
+            self.selection_summary_label.setText("")
+        elif selected_count == 0:
+            self.selection_summary_label.setText("Nessuna app selezionata")
+        else:
+            self.selection_summary_label.setText(f"{selected_count} di {total} selezionate")
+
+        self.update_all_btn.setText("Aggiorna tutto" if all_selected else "Aggiorna selezionate")
+        self.update_all_btn.setEnabled(selected_count > 0 and not is_updating)
+
+    def toggle_select_all(self) -> None:
+        actionable = self._actionable_candidates()
+        if not actionable:
+            return
+        should_select = not all(c.selected for c in actionable)
+        for candidate in actionable:
+            candidate.selected = should_select
+            card = self._card_map.get(candidate.app_id)
+            if card is not None:
+                card.checkbox.blockSignals(True)
+                card.checkbox.setChecked(should_select)
+                card.checkbox.blockSignals(False)
+        self._refresh_selection_controls()
+
+    def _on_candidate_selected(self, candidate: UpdateCandidate, selected: bool) -> None:
         candidate.selected = selected
+        self._refresh_selection_controls()
 
     def start_single_update(self, candidate: UpdateCandidate) -> None:
         self._launch_update_worker([candidate])
 
     def start_batch_update(self) -> None:
-        selected = [
-            c
-            for c in self.controller.candidates
-            if c.selected and c.status != UpdatePhase.COMPLETED
-        ]
+        selected = [c for c in self._actionable_candidates() if c.selected]
         if selected:
             self._launch_update_worker(selected)
 
@@ -557,6 +863,7 @@ class PatchWiseMainWindow(QMainWindow):
         if self._update_worker and self._update_worker.isRunning():
             return
         self.update_all_btn.setEnabled(False)
+        self.select_all_btn.setEnabled(False)
         self._update_worker = UpdateWorker(self.controller, candidates)
         self._update_worker.progress_changed.connect(self._on_progress_changed)
         self._update_worker.item_completed.connect(self._on_item_completed)
@@ -568,6 +875,7 @@ class PatchWiseMainWindow(QMainWindow):
         card = self._card_map.get(progress.app_id)
         if card:
             card.set_updating_state(progress.phase)
+        self._reposition_overlays()
 
     def _on_item_completed(self, record: UpdateRecord) -> None:
         self.download_banner.reset()
@@ -584,6 +892,7 @@ class PatchWiseMainWindow(QMainWindow):
 
         self._refresh_history_views()
         self._refresh_summary_chips()
+        self._refresh_selection_controls()
 
         if record.status == "success":
             self.show_notification(
@@ -606,8 +915,8 @@ class PatchWiseMainWindow(QMainWindow):
             )
 
     def _on_batch_finished(self, records: List[UpdateRecord]) -> None:
-        self.update_all_btn.setEnabled(True)
         self.download_banner.reset()
+        self._refresh_selection_controls()
 
         succeeded = [r for r in records if r.status == "success"]
         failed = [r for r in records if r.status != "success"]
@@ -641,27 +950,86 @@ class PatchWiseMainWindow(QMainWindow):
                 self.start_scan()
 
     def show_notification(self, title: str, message: str, level: str = "success") -> None:
-        self.notification_banner.show_message(title=title, message=message, level=level)
-        self._position_notification()
+        normalized = "success" if level == "success" else "warning"
+        item = NotificationItem(title=title, message=message, level=normalized)
+        self._notifications.insert(0, item)
+        if len(self._notifications) > self.MAX_NOTIFICATIONS:
+            self._notifications = self._notifications[: self.MAX_NOTIFICATIONS]
+
+        self.notifications_popover.set_notifications(self._notifications)
+        if not self.notifications_popover.isVisible():
+            self.notifications_btn.set_unread_count(self.notifications_btn.unread_count + 1)
+        else:
+            self._position_notifications_popover()
+
+        self.notification_banner.show_message(title=title, message=message, level=normalized)
+        target = self._compute_notification_pos()
+        self.notification_banner.slide_to(target, animate=True)
+
+    def _reposition_overlays(self) -> None:
+        if hasattr(self, "notification_banner") and self.notification_banner.isVisible():
+            self._position_notification()
+        if hasattr(self, "notifications_popover") and self.notifications_popover.isVisible():
+            self._position_notifications_popover()
+
+    def _compute_notification_pos(self) -> QPoint:
+        """Compute anchored bottom-right position for the discreet feedback toast."""
+        content_rect = self.right_container.geometry()
+        if content_rect.width() <= 0 or content_rect.height() <= 0:
+            content_rect = self.rect()
+        max_w = max(320, min(440, content_rect.width() - 40))
+        self.notification_banner.setMaximumWidth(max_w)
+        self.notification_banner.setMinimumWidth(min(340, max_w))
+        self.notification_banner.adjustSize()
+
+        bottom_margin = 20
+        if (
+            self._updates_expanded
+            and hasattr(self, "download_banner")
+            and self.download_banner.isVisible()
+        ):
+            bottom_margin = self.download_banner.height() + 34
+
+        x = content_rect.right() - self.notification_banner.width() - 22
+        y = content_rect.bottom() - self.notification_banner.height() - bottom_margin
+        return QPoint(max(12, x), max(12, y))
 
     def _position_notification(self) -> None:
-        content_rect = self.right_container.geometry()
-        if content_rect.width() <= 0:
-            content_rect = self.rect()
-        max_w = max(340, min(640, content_rect.width() - 48))
-        self.notification_banner.setMaximumWidth(max_w)
-        self.notification_banner.setMinimumWidth(min(420, max_w))
-        self.notification_banner.adjustSize()
-        x = content_rect.x() + (content_rect.width() - self.notification_banner.width()) // 2
-        top_offset = self.top_bar.height() + 10 if self.top_bar.height() > 0 else 16
-        y = content_rect.y() + top_offset
-        self.notification_banner.move(max(12, x), max(12, y))
-        self.notification_banner.raise_()
+        target = self._compute_notification_pos()
+        self.notification_banner.slide_to(target, animate=False)
+
+    def _compute_notifications_popover_pos(self) -> QPoint:
+        """Compute anchored position directly below the top-bar bell icon."""
+        self.notifications_popover.adjustSize()
+        bell_bottom_right = self.notifications_btn.mapTo(
+            self, self.notifications_btn.rect().bottomRight()
+        )
+        pop_w = self.notifications_popover.width()
+        x = bell_bottom_right.x() - pop_w
+        y = bell_bottom_right.y() + 10
+        x = max(12, min(x, self.width() - pop_w - 16))
+        y = max(12, y)
+        return QPoint(x, y)
+
+    def _position_notifications_popover(self) -> None:
+        self.notifications_popover.move(self._compute_notifications_popover_pos())
+        self.notifications_popover.raise_()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if hasattr(self, "notification_banner") and self.notification_banner.isVisible():
-            self._position_notification()
+        if self._theme_fade_overlay is not None:
+            self._theme_fade_overlay.setGeometry(self.rect())
+        self._reposition_overlays()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if (
+            event.key() == Qt.Key.Key_Escape
+            and hasattr(self, "notifications_popover")
+            and self.notifications_popover.isVisible()
+        ):
+            self.notifications_popover.hide()
+            return
+        super().keyPressEvent(event)
 
     def _toggle_pause(self) -> None:
         if not self._update_worker:
@@ -678,8 +1046,11 @@ class PatchWiseMainWindow(QMainWindow):
     def _refresh_history_views(self) -> None:
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
 
         current = self.controller.history.get_current_session_records()
         last = self.controller.history.get_last_session_records()

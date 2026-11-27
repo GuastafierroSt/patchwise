@@ -206,6 +206,10 @@ QMainWindow, QWidget {{
     font-size: 13px;
 }}
 
+QWidget#TransparentContainer {{
+    background-color: transparent;
+}}
+
 QFrame#Sidebar {{
     background-color: {t["sidebar_bg"]};
     border: none;
@@ -248,9 +252,57 @@ QFrame#Card:hover {{
 }}
 
 QFrame#ProgressBanner {{
-    background-color: {t["banner_bg"]};
-    border-radius: 12px;
+    background-color: {t["card_bg"]};
+    border-radius: 14px;
     border: 1px solid {t["banner_border"]};
+}}
+
+QFrame#NotificationsPopover {{
+    background-color: {t["card_bg"]};
+    border-radius: 16px;
+    border: 1px solid {t["card_border"]};
+}}
+
+QFrame#NotificationRow {{
+    background-color: {t["banner_bg"]};
+    border-radius: 11px;
+    border: 1px solid {t["card_border"]};
+}}
+
+QFrame#NotificationRow[level="success"] {{
+    border-left: 3px solid {t["toast_success_icon_bg"]};
+}}
+
+QFrame#NotificationRow[level="warning"] {{
+    border-left: 3px solid {t["toast_warning_icon_bg"]};
+}}
+
+QPushButton#GhostLinkButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {t["text_muted"]};
+}}
+
+QPushButton#GhostLinkButton:hover {{
+    background-color: {t["secondary_bg"]};
+    color: {t["text_primary"]};
+}}
+
+QPushButton#ExpandButton {{
+    background-color: {t["secondary_bg"]};
+    border: 1px solid {t["secondary_border"]};
+    border-radius: 10px;
+    padding: 6px;
+    color: {t["text_primary"]};
+}}
+
+QPushButton#ExpandButton:hover {{
+    background-color: {t["secondary_hover"]};
+    border: 1px solid {t["card_hover_border"]};
 }}
 
 QLabel#BrandLogo {{
@@ -483,6 +535,27 @@ QPushButton#SecondaryButton:hover {{
 }}
 
 QPushButton#SecondaryButton:disabled {{
+    background-color: {t["disabled_bg"]};
+    border: 1px solid transparent;
+    color: {t["disabled_text"]};
+}}
+
+QPushButton#CompactButton {{
+    background-color: {t["secondary_bg"]};
+    color: {t["secondary_text"]};
+    border: 1px solid {t["secondary_border"]};
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+
+QPushButton#CompactButton:hover {{
+    background-color: {t["secondary_hover"]};
+    border: 1px solid {t["card_hover_border"]};
+}}
+
+QPushButton#CompactButton:disabled {{
     background-color: {t["disabled_bg"]};
     border: 1px solid transparent;
     color: {t["disabled_text"]};

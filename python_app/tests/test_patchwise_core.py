@@ -251,6 +251,7 @@ class PatchWiseCoreTests(unittest.TestCase):
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QAbstractAnimation, QEventLoop, QTimer
     from PySide6.QtWidgets import QApplication
 
     from patchwise.ui.main_window import PatchWiseMainWindow
@@ -282,6 +283,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
     def test_active_download_banner_resets_after_completion_or_failure(self) -> None:
         banner = ActiveDownloadBanner(on_pause_toggle=lambda: None, on_cancel=lambda: None)
         self.addCleanup(banner.deleteLater)
+        self.assertTrue(banner.isHidden())
 
         banner.update_progress(
             DownloadProgress(
@@ -292,6 +294,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
                 message="Download in corso...",
             )
         )
+        self.assertFalse(banner.isHidden())
         self.assertIn("Microsoft Teams", banner.title_label.text())
         self.assertEqual(banner.progress_bar.value(), 55)
         self.assertTrue(banner.cancel_btn.isEnabled())
@@ -305,6 +308,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
                 message="Completato",
             )
         )
+        self.assertTrue(banner.isHidden())
         self.assertEqual(banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE)
         self.assertEqual(banner.progress_bar.value(), 0)
         self.assertFalse(banner.cancel_btn.isEnabled())
@@ -319,6 +323,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
                 message="Download in corso...",
             )
         )
+        self.assertFalse(banner.isHidden())
         banner.update_progress(
             DownloadProgress(
                 app_id="chrome",
@@ -328,6 +333,7 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
                 message="Errore",
             )
         )
+        self.assertTrue(banner.isHidden())
         self.assertEqual(banner.title_label.text(), ActiveDownloadBanner.IDLE_TITLE)
         self.assertEqual(banner.progress_bar.value(), 0)
         self.assertFalse(banner.cancel_btn.isEnabled())
@@ -457,6 +463,146 @@ class PatchWiseUiFeedbackTests(unittest.TestCase):
             self.assertEqual(window.current_theme, "light")
             self.assertIn("#f6f5fc", window.styleSheet())
             self.assertIn("#5c4fd6", window.styleSheet())
+
+    def test_updates_card_starts_collapsed_and_expands_on_click(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            self.assertFalse(window.is_updates_expanded)
+            self.assertTrue(window.updates_body.isHidden())
+            self.assertTrue(window.download_banner.isHidden())
+
+            candidate = UpdateCandidate(
+                app=InstalledApp("chrome", "Google Chrome", "Google", "1.0", "winget"),
+                online=OnlineVersionInfo("chrome", "2.0"),
+            )
+            window.controller.candidates = [candidate]
+            window._on_scan_finished([candidate])
+            # Must stay collapsed initially after scan until user clicks expand icon
+            self.assertFalse(window.is_updates_expanded)
+            self.assertTrue(window.updates_body.isHidden())
+
+            window.expand_updates_btn.click()
+            self.assertTrue(window.is_updates_expanded)
+            self.assertFalse(window.updates_body.isHidden())
+
+            window.expand_updates_btn.click()
+            self.assertFalse(window.is_updates_expanded)
+            self.assertTrue(window.updates_body.isHidden())
+
+    def test_notification_center_tracks_unread_badge_and_clears_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            window.show()
+            self.assertEqual(window.notifications_btn.unread_count, 0)
+            self.assertEqual(len(window.notification_items), 0)
+
+            window.show_notification("Aggiornamento completato", "Teams aggiornato", level="success")
+            window.show_notification("Aggiornamento non riuscito", "Chrome fallito", level="warning")
+            self.assertEqual(len(window.notification_items), 2)
+            self.assertEqual(window.notifications_btn.unread_count, 2)
+            self.assertTrue(window.notification_banner.isVisible())
+
+            # Opening the notification center marks all notifications as read
+            window.notifications_btn.click()
+            self.assertTrue(window.notifications_popover.isVisible())
+            self.assertEqual(window.notifications_btn.unread_count, 0)
+
+            window.clear_notifications()
+            self.assertEqual(len(window.notification_items), 0)
+
+    def test_select_all_and_deselect_all_updates_cta_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            self.assertEqual(window.update_all_btn.text(), "Aggiorna selezionate")
+            self.assertFalse(window.update_all_btn.isEnabled())
+            self.assertEqual(window.select_all_btn.text(), "Seleziona tutto")
+            self.assertFalse(window.select_all_btn.isEnabled())
+
+            candidates = [
+                UpdateCandidate(
+                    app=InstalledApp("chrome", "Google Chrome", "Google", "1.0", "winget"),
+                    online=OnlineVersionInfo("chrome", "2.0"),
+                ),
+                UpdateCandidate(
+                    app=InstalledApp("teams", "Microsoft Teams", "Microsoft", "1.0", "winget"),
+                    online=OnlineVersionInfo("teams", "2.0"),
+                ),
+                UpdateCandidate(
+                    app=InstalledApp("vlc", "VLC", "VideoLAN", "3.0", "winget"),
+                    online=OnlineVersionInfo("vlc", "3.1"),
+                ),
+            ]
+            window.controller.candidates = candidates
+            window._on_scan_finished(candidates)
+
+            # All selected initially -> "Aggiorna tutto" + "Deseleziona tutto"
+            self.assertEqual(window.update_all_btn.text(), "Aggiorna tutto")
+            self.assertTrue(window.update_all_btn.isEnabled())
+            self.assertEqual(window.select_all_btn.text(), "Deseleziona tutto")
+            self.assertTrue(window.select_all_btn.isEnabled())
+
+            # Click "Deseleziona tutto" -> none selected
+            window.select_all_btn.click()
+            self.assertTrue(all(not c.selected for c in candidates))
+            self.assertEqual(window.select_all_btn.text(), "Seleziona tutto")
+            self.assertEqual(window.update_all_btn.text(), "Aggiorna selezionate")
+            self.assertFalse(window.update_all_btn.isEnabled())
+
+            # Select a single app -> "Aggiorna selezionate" enabled
+            window._card_map["chrome"].checkbox.setChecked(True)
+            self.assertEqual(window.update_all_btn.text(), "Aggiorna selezionate")
+            self.assertTrue(window.update_all_btn.isEnabled())
+            self.assertEqual(window.select_all_btn.text(), "Seleziona tutto")
+
+            # Click "Seleziona tutto" -> back to "Aggiorna tutto"
+            window.select_all_btn.click()
+            self.assertTrue(all(c.selected for c in candidates))
+            self.assertEqual(window.update_all_btn.text(), "Aggiorna tutto")
+            self.assertTrue(window.update_all_btn.isEnabled())
+            self.assertEqual(window.select_all_btn.text(), "Deseleziona tutto")
+
+    @staticmethod
+    def _wait_qt(ms: int) -> None:
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec()
+
+    def test_ui_animations_run_and_complete_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._make_window(tmp)
+            window.show()
+            self._wait_qt(30)
+
+            # 1. Theme toggle switch + crossfade overlay animation
+            window.dark_theme_toggle.click()
+            self.assertEqual(window.current_theme, "dark")
+            self.assertIsNotNone(window._theme_fade_anim)
+            self._wait_qt(40)
+            self.assertEqual(window.dark_theme_toggle._anim.state(), QAbstractAnimation.State.Running)
+            self._wait_qt(460)
+            self.assertIsNone(window._theme_fade_overlay)
+            self.assertAlmostEqual(window.dark_theme_toggle.thumb_position, 1.0, places=2)
+
+            # 2. Expandable updates card accordion + 180° rotating chevron
+            window.expand_updates_btn.click()
+            self.assertTrue(window.is_updates_expanded)
+            self.assertIsNotNone(window._updates_anim)
+            self._wait_qt(480)
+            self.assertFalse(window.updates_body.isHidden())
+            self.assertAlmostEqual(window.expand_updates_btn.rotation_angle, 180.0, places=1)
+
+            window.expand_updates_btn.click()
+            self.assertFalse(window.is_updates_expanded)
+            self._wait_qt(440)
+            self.assertTrue(window.updates_body.isHidden())
+            self.assertAlmostEqual(window.expand_updates_btn.rotation_angle, 0.0, places=1)
+
+            # 3. Bell ring wiggle + toast slide + popover slide
+            window.show_notification("Test OK", "Animazione notifica", level="success")
+            self.assertIsNotNone(window.notifications_btn._ring_group)
+            window.toggle_notifications_panel()
+            self._wait_qt(360)
+            self.assertTrue(window.notifications_popover.isVisible())
 
 
 if __name__ == "__main__":
