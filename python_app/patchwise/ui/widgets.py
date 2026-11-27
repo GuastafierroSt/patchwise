@@ -23,7 +23,16 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -87,6 +96,154 @@ def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
         int(round(c1.blue() + (c2.blue() - c1.blue()) * clamped)),
         int(round(c1.alpha() + (c2.alpha() - c1.alpha()) * clamped)),
     )
+
+
+class LiquidGlassBackdrop(QWidget):
+    """Cached Apple Liquid Glass ambient aurora mesh background (zero per-frame gradient cost)."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._theme: str = "light"
+        self._cached_bg: Optional[QPixmap] = None
+        self._cached_key: tuple[int, int, str, float] = (0, 0, "", 1.0)
+
+    def set_theme(self, theme: str) -> None:
+        normalized = "dark" if theme == "dark" else "light"
+        if normalized != self._theme:
+            self._theme = normalized
+            self._cached_bg = None
+            self.update()
+
+    def _rebuild_cache(self, width: int, height: int, dpr: float) -> QPixmap:
+        pw = max(1, int(round(width * dpr)))
+        ph = max(1, int(round(height * dpr)))
+        pixmap = QPixmap(pw, ph)
+        pixmap.setDevicePixelRatio(dpr)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Base luminous gradient matching the PatchWise logo palette
+        base = QLinearGradient(0, 0, width, height)
+        if self._theme == "dark":
+            base.setColorAt(0.0, QColor("#090717"))
+            base.setColorAt(0.45, QColor("#120d29"))
+            base.setColorAt(1.0, QColor("#0b1329"))
+            orbs = (
+                (0.14, 0.16, 0.48, QColor(104, 91, 217, 118), QColor(104, 91, 217, 0)),
+                (0.84, 0.14, 0.44, QColor(17, 210, 242, 84), QColor(17, 210, 242, 0)),
+                (0.24, 0.86, 0.46, QColor(232, 48, 97, 74), QColor(232, 48, 97, 0)),
+                (0.78, 0.80, 0.50, QColor(164, 81, 214, 96), QColor(164, 81, 214, 0)),
+                (0.52, 0.48, 0.42, QColor(59, 219, 246, 36), QColor(59, 219, 246, 0)),
+            )
+        else:
+            base.setColorAt(0.0, QColor("#eef1ff"))
+            base.setColorAt(0.5, QColor("#f6f1ff"))
+            base.setColorAt(1.0, QColor("#e9faff"))
+            orbs = (
+                (0.14, 0.18, 0.48, QColor(139, 92, 246, 86), QColor(139, 92, 246, 0)),
+                (0.85, 0.15, 0.46, QColor(34, 211, 238, 86), QColor(34, 211, 238, 0)),
+                (0.22, 0.86, 0.44, QColor(244, 114, 182, 68), QColor(244, 114, 182, 0)),
+                (0.80, 0.84, 0.48, QColor(168, 85, 247, 74), QColor(168, 85, 247, 0)),
+                (0.52, 0.46, 0.38, QColor(56, 189, 248, 42), QColor(56, 189, 248, 0)),
+            )
+
+        painter.fillRect(0, 0, width, height, base)
+
+        max_dim = max(width, height)
+        for rx, ry, rr, c_in, c_out in orbs:
+            cx = width * rx
+            cy = height * ry
+            radius = max_dim * rr
+            grad = QRadialGradient(QPointF(cx, cy), radius)
+            grad.setColorAt(0.0, c_in)
+            grad.setColorAt(0.55, QColor(c_in.red(), c_in.green(), c_in.blue(), c_in.alpha() // 3))
+            grad.setColorAt(1.0, c_out)
+            painter.fillRect(0, 0, width, height, grad)
+
+        painter.end()
+        self._cached_bg = pixmap
+        self._cached_key = (width, height, self._theme, dpr)
+        return pixmap
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        if self._cached_bg is None or self._cached_key != (w, h, self._theme, dpr):
+            self._rebuild_cache(w, h, dpr)
+        painter = QPainter(self)
+        if self._cached_bg is not None:
+            painter.drawPixmap(0, 0, self._cached_bg)
+        painter.end()
+
+
+class GlassSheetTransitionOverlay(QWidget):
+    """Zero-layout 60fps composited slide/unfold overlay for the Liquid Glass updates card.
+
+    Because this overlay lives outside any QLayout and keeps a fixed geometry during the
+    entire transition, animating `progress` triggers ZERO layout passes, ZERO QSS gradient
+    recalculations, and ZERO QScrollArea re-wraps.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._snapshot: Optional[QPixmap] = None
+        self._progress: float = 0.0
+        self.hide()
+
+    def set_snapshot(self, pixmap: QPixmap) -> None:
+        self._snapshot = pixmap
+
+    def _get_progress(self) -> float:
+        return self._progress
+
+    def _set_progress(self, value: float) -> None:
+        clamped = max(0.0, min(1.0, float(value)))
+        if abs(clamped - self._progress) > 1e-4:
+            self._progress = clamped
+            self.update()
+
+    progress = Property(float, _get_progress, _set_progress)
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        if self._snapshot is None or self._progress <= 0.005:
+            return
+
+        w = float(self.width())
+        h = float(self.height())
+        if w <= 0 or h <= 0:
+            return
+
+        p = self._progress
+        # Smooth glass sheet reveal: gentle downward glide + rounded vertical unfold + fade
+        y_shift = -18.0 * (1.0 - p)
+        reveal_h = max(36.0, h * (0.14 + 0.86 * p))
+        opacity = min(1.0, 0.12 + 0.88 * math.pow(p, 0.72))
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setOpacity(opacity)
+
+        clip_rect = QRectF(0.0, max(0.0, y_shift), w, min(h, reveal_h))
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(clip_rect, 20.0, 20.0)
+        painter.setClipPath(clip_path)
+
+        dpr = self._snapshot.devicePixelRatio() or 1.0
+        painter.drawPixmap(
+            QRectF(0.0, y_shift, w, h),
+            self._snapshot,
+            QRectF(0.0, 0.0, self._snapshot.width(), self._snapshot.height()),
+        )
+        painter.end()
+
+
+# Backward-compatible alias
+AccordionRevealProxy = GlassSheetTransitionOverlay
 
 
 class AppAvatarBadge(QLabel):
@@ -679,6 +836,9 @@ class StatusNotificationBanner(QFrame):
         self._slide_anim = QPropertyAnimation(self, b"pos", self)
         self._slide_anim.setDuration(330)
         self._slide_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+        self._slide_start_timer = QTimer(self)
+        self._slide_start_timer.setSingleShot(True)
+        self._slide_start_timer.timeout.connect(self._slide_anim.start)
 
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -697,6 +857,7 @@ class StatusNotificationBanner(QFrame):
             widget.style().polish(widget)
 
     def slide_to(self, target_pos: QPoint, animate: bool = True) -> None:
+        self._slide_start_timer.stop()
         self._slide_anim.stop()
         parent = self.parentWidget()
         if animate and parent is not None and parent.isVisible():
@@ -704,7 +865,7 @@ class StatusNotificationBanner(QFrame):
             self.move(start_pos)
             self._slide_anim.setStartValue(start_pos)
             self._slide_anim.setEndValue(target_pos)
-            QTimer.singleShot(0, self._slide_anim.start)
+            self._slide_start_timer.start(0)
         else:
             self.move(target_pos)
         self.raise_()
@@ -733,6 +894,7 @@ class StatusNotificationBanner(QFrame):
 
     def dismiss(self) -> None:
         self._hide_timer.stop()
+        self._slide_start_timer.stop()
         self._slide_anim.stop()
         self.hide()
 

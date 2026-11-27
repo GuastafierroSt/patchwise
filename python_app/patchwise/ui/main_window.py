@@ -11,12 +11,14 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPoint,
     QPropertyAnimation,
+    QRect,
     QSize,
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QCloseEvent, QKeyEvent, QResizeEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent, QPixmap, QRegion, QResizeEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
@@ -48,7 +50,9 @@ from patchwise.ui.widgets import (
     ActiveDownloadBanner,
     AnimatedChevronButton,
     AppUpdateCard,
+    GlassSheetTransitionOverlay,
     HistoryRowWidget,
+    LiquidGlassBackdrop,
     ModernToggleSwitch,
     NotificationBellButton,
     NotificationItem,
@@ -76,6 +80,9 @@ class PatchWiseMainWindow(QMainWindow):
         self._updates_expanded: bool = False
         self._sidebar_anim: Optional[QPropertyAnimation] = None
         self._updates_anim: Optional[QPropertyAnimation] = None
+        self._updates_anim_timer = QTimer(self)
+        self._updates_anim_timer.setSingleShot(True)
+        self._updates_anim_timer.timeout.connect(self._start_pending_updates_anim)
         self._page_fade_anim: Optional[QPropertyAnimation] = None
         self._theme_fade_overlay: Optional[QLabel] = None
         self._theme_fade_anim: Optional[QPropertyAnimation] = None
@@ -113,9 +120,9 @@ class PatchWiseMainWindow(QMainWindow):
         return list(self._notifications)
 
     def _build_layout(self) -> None:
-        root = QWidget()
-        self.setCentralWidget(root)
-        outer = QHBoxLayout(root)
+        self._glass_root = LiquidGlassBackdrop()
+        self.setCentralWidget(self._glass_root)
+        outer = QHBoxLayout(self._glass_root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
@@ -204,8 +211,9 @@ class PatchWiseMainWindow(QMainWindow):
         theme_layout.addWidget(self.dark_theme_toggle)
         sb_layout.addWidget(theme_card)
 
-        # Right side: persistent TopBar + content stack
+        # Right side: persistent TopBar + content stack over Liquid Glass backdrop
         self.right_container = QWidget()
+        self.right_container.setObjectName("TransparentContainer")
         right_layout = QVBoxLayout(self.right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
@@ -214,6 +222,7 @@ class PatchWiseMainWindow(QMainWindow):
         right_layout.addWidget(self.top_bar)
 
         self.stack = QStackedWidget()
+        self.stack.setObjectName("GlassStack")
         self.stack.addWidget(self._build_dashboard_page())
         self.stack.addWidget(self._build_history_page())
         right_layout.addWidget(self.stack, stretch=1)
@@ -377,10 +386,63 @@ class PatchWiseMainWindow(QMainWindow):
     def toggle_updates_list(self) -> None:
         self.set_updates_expanded(not self._updates_expanded, animate=True)
 
+    def _compute_updates_card_rect(self) -> QRect:
+        """Compute the exact pixel rectangle where the separate UpdatesListCard sits."""
+        margins = self.dashboard_layout.contentsMargins()
+        spacing = self.dashboard_layout.spacing()
+        page_w = max(360, self.dashboard_page.width())
+        page_h = max(360, self.dashboard_page.height())
+
+        top_y = self.hero_card.geometry().bottom() + 1 + spacing
+        if self.download_banner.isVisible():
+            dl_bottom = self.download_banner.geometry().bottom() + 1
+            if dl_bottom > top_y:
+                top_y = dl_bottom + spacing
+            else:
+                top_y += max(self.download_banner.height(), self.download_banner.sizeHint().height()) + spacing
+
+        w = max(320, page_w - margins.left() - margins.right())
+        h = max(200, page_h - margins.bottom() - top_y)
+        return QRect(margins.left(), top_y, w, h)
+
+    def _capture_updates_card_snapshot(self, rect: QRect) -> QPixmap:
+        """Render the entire Liquid Glass UpdatesListCard once into a transparent HiDPI pixmap."""
+        w = max(1, rect.width())
+        h = max(1, rect.height())
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+
+        pixmap = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        was_visible = self.updates_card.isVisible()
+        if not was_visible:
+            # Synchronous show -> offscreen render -> hide within one tick (zero screen flash)
+            self.updates_card.setFixedSize(w, h)
+            self.updates_card.setVisible(True)
+            if self.updates_card.layout() is not None:
+                self.updates_card.layout().activate()
+            self.updates_scroll.viewport().resize(
+                max(1, self.updates_scroll.width()),
+                max(1, self.updates_scroll.height()),
+            )
+            if self.updates_container.layout() is not None:
+                self.updates_container.layout().activate()
+            QApplication.sendPostedEvents(None, 0)
+            self.updates_card.render(pixmap, QPoint(0, 0), QRegion(0, 0, w, h))
+            self.updates_card.setVisible(False)
+            self.updates_card.setMinimumSize(0, 0)
+            self.updates_card.setMaximumSize(16777215, 16777215)
+        else:
+            self.updates_card.render(pixmap, QPoint(0, 0), QRegion(0, 0, w, h))
+
+        return pixmap
+
     def set_updates_expanded(self, expanded: bool, animate: bool = True) -> None:
         self._updates_expanded = expanded
         use_anim = animate and self.isVisible()
 
+        self._updates_anim_timer.stop()
         if self._updates_anim is not None:
             self._updates_anim.stop()
 
@@ -390,78 +452,101 @@ class PatchWiseMainWindow(QMainWindow):
         )
 
         if not use_anim:
-            self.updates_body.setMaximumHeight(16777215)
-            self.updates_body.setVisible(expanded)
+            self._updates_overlay.hide()
+            self._updates_overlay.progress = 1.0 if expanded else 0.0
+            self.updates_card.setVisible(expanded)
             self._dashboard_spacer.setVisible(not expanded)
-            self.dashboard_layout.setStretchFactor(self.hero_card, 1 if expanded else 0)
+            self.dashboard_layout.setStretchFactor(self.updates_card, 1 if expanded else 0)
             self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0 if expanded else 1)
             self._reposition_overlays()
             return
 
         if expanded:
-            download_h = (
-                self.download_banner.height() + 16 if self.download_banner.isVisible() else 0
-            )
-            header_h = self.hero_header_widget.sizeHint().height()
-            # Match exact final height when hero_card switches to stretch=1 (zero end-jump)
-            target_h = max(220, self.stack.height() - 44 - header_h - 56 - download_h)
-            start_h = self.updates_body.height() if self.updates_body.isVisible() else 0
+            target_rect = self._compute_updates_card_rect()
+            if self._updates_overlay.isVisible():
+                start_p = self._updates_overlay.progress
+            else:
+                start_p = 0.0
+                snapshot = self._capture_updates_card_snapshot(target_rect)
+                self._updates_overlay.set_snapshot(snapshot)
+                self._updates_overlay.progress = 0.0
 
-            self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+            self.updates_card.setVisible(False)
             self._dashboard_spacer.setVisible(True)
+            self.dashboard_layout.setStretchFactor(self.updates_card, 0)
             self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-            self.updates_body.setMaximumHeight(start_h)
-            self.updates_body.setVisible(True)
 
-            anim = QPropertyAnimation(self.updates_body, b"maximumHeight", self)
+            self._updates_overlay.setGeometry(target_rect)
+            self._updates_overlay.show()
+            self._updates_overlay.raise_()
+
+            anim = QPropertyAnimation(self._updates_overlay, b"progress", self)
             anim.setDuration(380)
-            anim.setStartValue(start_h)
-            anim.setEndValue(target_h)
-            anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+            anim.setStartValue(start_p)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutQuint)
             anim.finished.connect(self._on_updates_expand_finished)
             self._updates_anim = anim
-            QTimer.singleShot(0, anim.start)
+            self._updates_anim_timer.start(0)
         else:
-            start_h = self.updates_body.height() if self.updates_body.isVisible() else 0
-            if start_h <= 0:
-                self.updates_body.setVisible(False)
-                self.updates_body.setMaximumHeight(16777215)
+            if self._updates_overlay.isVisible():
+                start_p = self._updates_overlay.progress
+            elif self.updates_card.isVisible() and self.updates_card.height() > 0:
+                card_rect = self.updates_card.geometry()
+                snapshot = self._capture_updates_card_snapshot(card_rect)
+                self._updates_overlay.set_snapshot(snapshot)
+                self._updates_overlay.setGeometry(card_rect)
+                self._updates_overlay.progress = 1.0
+                start_p = 1.0
+            else:
+                self._updates_overlay.hide()
+                self._updates_overlay.progress = 0.0
+                self.updates_card.setVisible(False)
                 self._dashboard_spacer.setVisible(True)
-                self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+                self.dashboard_layout.setStretchFactor(self.updates_card, 0)
                 self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
                 self._reposition_overlays()
                 return
 
-            self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+            self.updates_card.setVisible(False)
             self._dashboard_spacer.setVisible(True)
+            self.dashboard_layout.setStretchFactor(self.updates_card, 0)
             self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-            self.updates_body.setMaximumHeight(start_h)
+            self._updates_overlay.show()
+            self._updates_overlay.raise_()
 
-            anim = QPropertyAnimation(self.updates_body, b"maximumHeight", self)
-            anim.setDuration(340)
-            anim.setStartValue(start_h)
-            anim.setEndValue(0)
+            anim = QPropertyAnimation(self._updates_overlay, b"progress", self)
+            anim.setDuration(310)
+            anim.setStartValue(start_p)
+            anim.setEndValue(0.0)
             anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
             anim.finished.connect(self._on_updates_collapse_finished)
             self._updates_anim = anim
-            QTimer.singleShot(0, anim.start)
+            self._updates_anim_timer.start(0)
+
+    def _start_pending_updates_anim(self) -> None:
+        if self._updates_anim is not None:
+            self._updates_anim.start()
 
     def _on_updates_expand_finished(self) -> None:
         if not self._updates_expanded:
             return
-        self.updates_body.setMaximumHeight(16777215)
+        self._updates_overlay.hide()
+        self._updates_overlay.progress = 1.0
         self._dashboard_spacer.setVisible(False)
-        self.dashboard_layout.setStretchFactor(self.hero_card, 1)
+        self.updates_card.setVisible(True)
+        self.dashboard_layout.setStretchFactor(self.updates_card, 1)
         self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0)
         self._reposition_overlays()
 
     def _on_updates_collapse_finished(self) -> None:
         if self._updates_expanded:
             return
-        self.updates_body.setVisible(False)
-        self.updates_body.setMaximumHeight(16777215)
+        self._updates_overlay.hide()
+        self._updates_overlay.progress = 0.0
+        self.updates_card.setVisible(False)
         self._dashboard_spacer.setVisible(True)
-        self.dashboard_layout.setStretchFactor(self.hero_card, 0)
+        self.dashboard_layout.setStretchFactor(self.updates_card, 0)
         self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
         self._reposition_overlays()
 
@@ -498,6 +583,7 @@ class PatchWiseMainWindow(QMainWindow):
         if animate and theme_changed and self.isVisible() and self.width() > 0 and self.height() > 0:
             snapshot = self.grab()
 
+        self._glass_root.set_theme(normalized)
         self.setStyleSheet(get_theme_qss(normalized))
         self._refresh_icons()
         self._apply_windows_titlebar_theme(normalized == "dark")
@@ -593,16 +679,18 @@ class PatchWiseMainWindow(QMainWindow):
 
     def _build_dashboard_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("GlassPage")
+        self.dashboard_page = page
         self.dashboard_layout = QVBoxLayout(page)
         self.dashboard_layout.setContentsMargins(26, 22, 26, 22)
         self.dashboard_layout.setSpacing(16)
 
-        # Expandable updates summary card (collapsed by default until chevron is clicked)
+        # SECTION 1: Compact Liquid Glass summary card (fixed height — never thrashes layout)
         self.hero_card = QFrame()
         self.hero_card.setObjectName("HeroCard")
         hero_layout = QVBoxLayout(self.hero_card)
-        hero_layout.setContentsMargins(22, 20, 22, 20)
-        hero_layout.setSpacing(14)
+        hero_layout.setContentsMargins(22, 18, 22, 18)
+        hero_layout.setSpacing(0)
 
         self.hero_header_widget = QWidget()
         self.hero_header_widget.setObjectName("TransparentContainer")
@@ -641,19 +729,26 @@ class PatchWiseMainWindow(QMainWindow):
         hero_header.addWidget(self.expand_updates_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
         hero_layout.addWidget(self.hero_header_widget)
 
-        # Collapsible body inside the summary card containing the scrollable apps list
-        self.updates_body = QWidget()
-        self.updates_body.setObjectName("TransparentContainer")
-        body_layout = QVBoxLayout(self.updates_body)
-        body_layout.setContentsMargins(0, 2, 0, 0)
-        body_layout.setSpacing(12)
+        # Standalone active download section directly below the summary card,
+        # visible ONLY while a download/update is in progress.
+        self.download_banner = ActiveDownloadBanner(
+            on_pause_toggle=self._toggle_pause,
+            on_cancel=self._cancel_active_update,
+        )
 
-        body_divider = QFrame()
-        body_divider.setObjectName("SidebarDivider")
-        body_layout.addWidget(body_divider)
+        # SECTION 2: Separate Liquid Glass card dedicated to the apps list
+        self.updates_card = QFrame()
+        self.updates_card.setObjectName("UpdatesListCard")
+        self.updates_body = self.updates_card  # Alias for compatibility
+        list_card_layout = QVBoxLayout(self.updates_card)
+        list_card_layout.setContentsMargins(20, 16, 20, 16)
+        list_card_layout.setSpacing(12)
 
         selection_row = QHBoxLayout()
         selection_row.setSpacing(10)
+        list_title = QLabel("Applicazioni da aggiornare")
+        list_title.setObjectName("SectionTitle")
+
         self.select_all_btn = QPushButton("Seleziona tutto")
         self.select_all_btn.setObjectName("CompactButton")
         self.select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -662,10 +757,16 @@ class PatchWiseMainWindow(QMainWindow):
         self.selection_summary_label = QLabel("")
         self.selection_summary_label.setObjectName("MutedText")
 
-        selection_row.addWidget(self.select_all_btn)
+        selection_row.addWidget(list_title)
+        selection_row.addSpacing(6)
         selection_row.addWidget(self.selection_summary_label)
         selection_row.addStretch()
-        body_layout.addLayout(selection_row)
+        selection_row.addWidget(self.select_all_btn)
+        list_card_layout.addLayout(selection_row)
+
+        list_divider = QFrame()
+        list_divider.setObjectName("SidebarDivider")
+        list_card_layout.addWidget(list_divider)
 
         self.updates_scroll = QScrollArea()
         self.updates_scroll.setWidgetResizable(True)
@@ -675,29 +776,26 @@ class PatchWiseMainWindow(QMainWindow):
         self.updates_layout.setSpacing(10)
         self.updates_layout.addStretch()
         self.updates_scroll.setWidget(self.updates_container)
-        body_layout.addWidget(self.updates_scroll, stretch=1)
+        list_card_layout.addWidget(self.updates_scroll, stretch=1)
 
-        self.updates_body.setVisible(False)
-        hero_layout.addWidget(self.updates_body, stretch=1)
-
-        # Standalone active download section placed BELOW the updates card,
-        # visible ONLY while a download/update is in progress.
-        self.download_banner = ActiveDownloadBanner(
-            on_pause_toggle=self._toggle_pause,
-            on_cancel=self._cancel_active_update,
-        )
+        self.updates_card.setVisible(False)
 
         self._dashboard_spacer = QWidget()
         self._dashboard_spacer.setObjectName("TransparentContainer")
 
         self.dashboard_layout.addWidget(self.hero_card, stretch=0)
         self.dashboard_layout.addWidget(self.download_banner, stretch=0)
+        self.dashboard_layout.addWidget(self.updates_card, stretch=0)
         self.dashboard_layout.addWidget(self._dashboard_spacer, stretch=1)
+
+        # Floating zero-layout 60fps transition overlay for UpdatesListCard
+        self._updates_overlay = GlassSheetTransitionOverlay(page)
 
         return page
 
     def _build_history_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("GlassPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(26, 22, 26, 22)
         layout.setSpacing(16)
@@ -982,16 +1080,8 @@ class PatchWiseMainWindow(QMainWindow):
         self.notification_banner.setMinimumWidth(min(340, max_w))
         self.notification_banner.adjustSize()
 
-        bottom_margin = 20
-        if (
-            self._updates_expanded
-            and hasattr(self, "download_banner")
-            and self.download_banner.isVisible()
-        ):
-            bottom_margin = self.download_banner.height() + 34
-
         x = content_rect.right() - self.notification_banner.width() - 22
-        y = content_rect.bottom() - self.notification_banner.height() - bottom_margin
+        y = content_rect.bottom() - self.notification_banner.height() - 20
         return QPoint(max(12, x), max(12, y))
 
     def _position_notification(self) -> None:
