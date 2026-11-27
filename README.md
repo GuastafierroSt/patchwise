@@ -18,13 +18,6 @@
   <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Scarica%20PatchWise.exe-Windows%2064--bit-685bd9?style=for-the-badge" alt="Scarica PatchWise.exe" height="40" />
 </a>
 
-<sub>
-  <a href="https://github.com/GuastafierroSt/patchWise/releases">Tutte le versioni &amp; Changelog</a> ·
-  <a href="#funzionalità-principali">Funzionalità</a> ·
-  <a href="#avvio-rapido-utenti">Download &amp; Uso</a> ·
-  <a href="#sviluppo-e-compilazione">Sviluppo &amp; Build</a>
-</sub>
-
 </div>
 
 ---
