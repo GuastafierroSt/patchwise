@@ -18,6 +18,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List
 
@@ -80,6 +81,52 @@ def build_pyinstaller_command(
     return cmd
 
 
+def ensure_output_writable(output_bin: Path, kill_running: bool = True) -> bool:
+    """Ensure an existing target .exe is not locked before spending time compiling.
+
+    On Windows, if an older instance of `PatchWise_Portable.exe` is still running,
+    gracefully terminates it and waits briefly for the OS to release the file lock.
+    """
+    if not output_bin.exists():
+        return True
+
+    try:
+        output_bin.unlink()
+        return True
+    except PermissionError:
+        pass
+
+    if kill_running and sys.platform.startswith("win"):
+        print(
+            f"Rilevato blocco su {output_bin.name}: chiusura eventuali istanze attive in corso..."
+        )
+        subprocess.run(
+            ["taskkill", "/IM", output_bin.name, "/F", "/T"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for _ in range(10):
+            time.sleep(0.3)
+            if not output_bin.exists():
+                return True
+            try:
+                output_bin.unlink()
+                return True
+            except PermissionError:
+                continue
+
+    print(
+        f"\n[ERRORE] Impossibile sovrascrivere '{output_bin}' perché il file è ancora "
+        "in uso da un altro processo (es. PatchWise aperto, scheda dell'editor o antivirus)."
+    )
+    print(
+        "Chiudi PatchWise_Portable.exe (controlla anche Gestione Attività / Task Manager) "
+        "o eventuali schede che tengono aperto il file, poi riesegui build_portable.bat."
+    )
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compila PatchWise Desktop in un eseguibile Windows .EXE portable."
@@ -116,6 +163,11 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    ext = ".exe" if sys.platform.startswith("win") else ""
+    output_bin = project_root / "dist" / f"{args.name}{ext}"
+    if not ensure_output_writable(output_bin):
+        return 1
+
     try:
         subprocess.run(cmd, check=True)
     except FileNotFoundError:
@@ -125,8 +177,6 @@ def main() -> int:
         print(f"Compilazione fallita con codice {exc.returncode}.")
         return exc.returncode
 
-    ext = ".exe" if sys.platform.startswith("win") else ""
-    output_bin = project_root / "dist" / f"{args.name}{ext}"
     if output_bin.exists():
         size_mb = output_bin.stat().st_size / (1024 * 1024)
         print(f"\nBuild completata con successo: {output_bin} ({size_mb:.1f} MB)")

@@ -1,19 +1,19 @@
-# PatchWise Desktop — Python Software Updater (Portable)
+# PatchWise Desktop v3.0 — Software & Driver Updater (Portable)
 
-Applicazione desktop Windows sviluppata in Python con architettura OOP a classi per:
-1. **Scansione locale** dei programmi installati tramite Registro di Windows (`WindowsRegistryDetector`) e Windows Package Manager (`WingetDetector`).
-2. **Confronto online** con le versioni più recenti disponibili (`WingetVersionChecker`, `GitHubReleasesChecker`).
+Applicazione desktop Windows (stile Apple Liquid Glass, tema chiaro/scuro) sviluppata in Python con architettura OOP a classi per:
+1. **Aggiornamenti Applicazioni**: scansione locale tramite Registro di Windows (`WindowsRegistryDetector`) e Winget (`WingetDetector`), confronto online (`WingetVersionChecker`, `GitHubReleasesChecker`) e aggiornamento manuale (`WingetAppUpdater`, `DirectHttpInstaller`).
+2. **Aggiornamenti Driver (v3.0)**: scansione hardware locale tramite Registro di Windows (`WindowsDriverRegistryDetector`) e WMI/CIM (`WindowsCimDriverDetector`), ricerca driver ufficiali firmati WHQL tramite Windows Update Agent (`WindowsUpdateDriverChecker`) e installazione manuale controllata (`WindowsUpdateDriverUpdater`).
 3. **Aggiornamento esclusivamente manuale** (`AUTO_UPDATE_ALLOWED = False`): nessun interruttore o pianificazione di auto-update.
-4. **Monitoraggio live del download e installazione** tramite barra di avanzamento intuitiva (fase, percentuale, MB, velocità, ETA, pausa/annulla).
-5. **Cronologia stateless di sessione** (`StatelessSessionHistoryManager`): mantiene in RAM gli aggiornamenti della sessione attiva e salva su chiusura solo uno snapshot volatile in `%TEMP%\patchwise_last_session.json` relativo all'ultima sessione, scartando tutte le sessioni più vecchie.
+4. **Monitoraggio live e Centro Notifiche**: barra di avanzamento dedicata visibile solo durante il download, notifiche con badge campanella e toast discreto in basso a destra.
+5. **Cronologia stateless di sessione** (`StatelessSessionHistoryManager`): mantiene in RAM gli aggiornamenti di app e driver della sessione attiva e salva su chiusura solo uno snapshot volatile in `%TEMP%\patchwise_last_session.json`.
 
 ## Gerarchia delle Classi
-- `AppDetector (ABC)` → `WindowsRegistryDetector`, `WingetDetector`, `CompositeAppDetector`
-- `VersionChecker (ABC)` → `WingetVersionChecker`, `GitHubReleasesChecker`, `CompositeVersionChecker`
-- `AppUpdater (ABC)` → `WingetAppUpdater`, `DirectHttpInstaller`
+- `AppDetector (ABC)` → `WindowsRegistryDetector`, `WingetDetector`, `WindowsDriverRegistryDetector`, `WindowsCimDriverDetector`, `CompositeAppDetector`
+- `VersionChecker (ABC)` → `WingetVersionChecker`, `GitHubReleasesChecker`, `WindowsUpdateDriverChecker`, `CompositeVersionChecker`
+- `AppUpdater (ABC)` → `WingetAppUpdater`, `DirectHttpInstaller`, `WindowsUpdateDriverUpdater`
 - `StatelessSessionHistoryManager`
-- `UpdateManagerController` (Facade)
-- `PatchWiseMainWindow (QMainWindow)` + `ScanWorker` / `UpdateWorker` (`QThread`) + `ActiveDownloadBanner` / `AppUpdateCard`
+- `UpdateManagerController` (Facade per App e Driver)
+- `PatchWiseMainWindow (QMainWindow)` + `UpdateSectionView` + `ScanWorker` / `UpdateWorker` (`QThread`) + `LiquidGlassBackdrop` / `GlassSheetTransitionOverlay` / `NotificationsPopover`
 
 ## Avvio rapido in sviluppo
 ```bash

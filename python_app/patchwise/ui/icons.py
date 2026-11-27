@@ -35,7 +35,6 @@ def load_brand_pixmap(size: int = 40) -> QPixmap:
             )
             scaled.setDevicePixelRatio(scale)
             return scaled
-    # Fallback monogram if asset file is absent
     pixmap, painter = _make_canvas(size)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor("#685bd9"))
@@ -90,15 +89,12 @@ def make_sidebar_toggle_icon(color: str, sidebar_open: bool = True, size: int = 
     painter.drawLine(QPointF(divider_x, 3.2), QPointF(divider_x, size - 3.2))
 
     if sidebar_open:
-        # Subtle filled left rail indicator when open
         fill = QColor(color)
         fill.setAlpha(45)
         painter.fillRect(QRectF(3.0, 3.8, divider_x - 3.6, size - 7.6), fill)
-        # Small left chevron on the right pane
         painter.drawLine(QPointF(12.8, 7.2), QPointF(10.6, size / 2.0))
         painter.drawLine(QPointF(10.6, size / 2.0), QPointF(12.8, size - 7.2))
     else:
-        # Small right chevron indicating open action
         painter.drawLine(QPointF(10.6, 7.2), QPointF(12.8, size / 2.0))
         painter.drawLine(QPointF(12.8, size / 2.0), QPointF(10.6, size - 7.2))
 
@@ -107,7 +103,7 @@ def make_sidebar_toggle_icon(color: str, sidebar_open: bool = True, size: int = 
 
 
 def make_dashboard_icon(color: str, size: int = 16) -> QIcon:
-    """Draw a clean 4-tile dashboard grid icon."""
+    """Draw a clean 4-tile applications grid icon."""
     pixmap, painter = _make_canvas(size)
     painter.setPen(_stroke_pen(color, 1.6))
     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -117,6 +113,25 @@ def make_dashboard_icon(color: str, size: int = 16) -> QIcon:
         for col in range(2):
             rect = QRectF(2.0 + col * (tile + gap), 2.0 + row * (tile + gap), tile, tile)
             painter.drawRoundedRect(rect, 1.8, 1.8)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_driver_icon(color: str, size: int = 16) -> QIcon:
+    """Draw a crisp hardware microchip / driver icon."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 1.5))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    painter.drawRoundedRect(QRectF(4.2, 4.2, size - 8.4, size - 8.4), 2.0, 2.0)
+    painter.drawRoundedRect(QRectF(6.6, 6.6, size - 13.2, size - 13.2), 0.9, 0.9)
+
+    for offset in (6.0, 10.0):
+        painter.drawLine(QPointF(offset, 1.8), QPointF(offset, 4.0))
+        painter.drawLine(QPointF(offset, size - 4.0), QPointF(offset, size - 1.8))
+        painter.drawLine(QPointF(1.8, offset), QPointF(4.0, offset))
+        painter.drawLine(QPointF(size - 4.0, offset), QPointF(size - 1.8, offset))
+
     painter.end()
     return QIcon(pixmap)
 
@@ -141,7 +156,6 @@ def make_refresh_icon(color: str, size: int = 16) -> QIcon:
     painter.setBrush(Qt.BrushStyle.NoBrush)
     rect = QRectF(2.6, 2.6, size - 5.2, size - 5.2)
     painter.drawArc(rect, 35 * 16, 290 * 16)
-    # Arrowhead at top-right
     painter.drawLine(QPointF(size - 3.6, 3.0), QPointF(size - 3.0, 6.2))
     painter.drawLine(QPointF(size - 6.2, 5.6), QPointF(size - 3.0, 6.2))
     painter.end()
@@ -211,9 +225,7 @@ def make_bell_icon(color: str, size: int = 18) -> QIcon:
     painter.setBrush(Qt.BrushStyle.NoBrush)
 
     cx = size / 2.0
-    # Top stem
     painter.drawLine(QPointF(cx, 2.2), QPointF(cx, 3.6))
-    # Bell dome
     path = QPainterPath()
     path.moveTo(4.0, 12.8)
     path.cubicTo(4.8, 11.4, 5.0, 9.6, 5.0, 7.6)
@@ -222,8 +234,6 @@ def make_bell_icon(color: str, size: int = 18) -> QIcon:
     path.cubicTo(13.0, 9.6, 13.2, 11.4, 14.0, 12.8)
     path.closeSubpath()
     painter.drawPath(path)
-
-    # Bottom clapper arc
     painter.drawArc(QRectF(cx - 2.0, 12.4, 4.0, 3.2), 190 * 16, 160 * 16)
     painter.end()
     return QIcon(pixmap)
@@ -241,5 +251,73 @@ def make_chevron_icon(color: str, expanded: bool = False, size: int = 16) -> QIc
     else:
         painter.drawLine(QPointF(4.0, 5.8), QPointF(size / 2.0, 10.2))
         painter.drawLine(QPointF(size / 2.0, 10.2), QPointF(size - 4.0, 5.8))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_copy_icon(color: str, size: int = 15) -> QIcon:
+    """Draw a crisp HiDPI double-sheet copy vector icon."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 1.5))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    # Front rounded sheet
+    painter.drawRoundedRect(QRectF(5.2, 5.2, 7.6, 7.8), 1.8, 1.8)
+    # Back sheet L-edge (top-left)
+    back = QPainterPath()
+    back.moveTo(9.8, 5.2)
+    back.lineTo(9.8, 3.6)
+    back.quadTo(9.8, 2.2, 8.4, 2.2)
+    back.lineTo(3.6, 2.2)
+    back.quadTo(2.2, 2.2, 2.2, 3.6)
+    back.lineTo(2.2, 8.6)
+    back.quadTo(2.2, 10.0, 3.6, 10.0)
+    back.lineTo(5.2, 10.0)
+    painter.drawPath(back)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_check_icon(color: str, size: int = 15) -> QIcon:
+    """Draw a crisp HiDPI anti-aliased checkmark vector icon (no bitmap glyph fallback)."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 2.1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    s = float(size)
+    path = QPainterPath()
+    path.moveTo(s * 0.20, s * 0.54)
+    path.lineTo(s * 0.42, s * 0.76)
+    path.lineTo(s * 0.82, s * 0.28)
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_close_icon(color: str, size: int = 12) -> QIcon:
+    """Draw a geometrically centered HiDPI 'X' close vector icon."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 1.8))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    pad = size * 0.25
+    painter.drawLine(QPointF(pad, pad), QPointF(size - pad, size - pad))
+    painter.drawLine(QPointF(size - pad, pad), QPointF(pad, size - pad))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def make_alert_icon(color: str, size: int = 14) -> QIcon:
+    """Draw a crisp centered HiDPI exclamation mark icon for warning/error badges."""
+    pixmap, painter = _make_canvas(size)
+    painter.setPen(_stroke_pen(color, 2.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    cx = size / 2.0
+    painter.drawLine(QPointF(cx, size * 0.20), QPointF(cx, size * 0.58))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    r = max(1.1, size * 0.085)
+    painter.drawEllipse(QPointF(cx, size * 0.78), r, r)
     painter.end()
     return QIcon(pixmap)

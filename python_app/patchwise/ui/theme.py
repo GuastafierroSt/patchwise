@@ -75,8 +75,8 @@ LIGHT_TOKENS: Dict[str, str] = {
     "input_focus_bg": "rgba(255, 255, 255, 0.90)",
     "input_placeholder": "#8c84a8",
     "bar_bg": "rgba(104, 91, 217, 0.14)",
-    "checkbox_bg": "rgba(255, 255, 255, 0.78)",
-    "checkbox_border": "#b9b0d8",
+    "checkbox_bg": "rgba(255, 255, 255, 0.94)",
+    "checkbox_border": "#c5bce0",
     "checkbox_hover": "#685bd9",
     "scroll_handle": "rgba(104, 91, 217, 0.28)",
     "scroll_handle_hover": "rgba(104, 91, 217, 0.48)",
@@ -355,12 +355,57 @@ QFrame#NotificationRow {{
     border: 1px solid {t["card_border"]};
 }}
 
+QFrame#NotificationRow:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 {t["glass_card_hover_top"]},
+        stop:1 {t["glass_card_hover_bot"]}
+    );
+    border: 1px solid {t["card_hover_border"]};
+}}
+
 QFrame#NotificationRow[level="success"] {{
     border-left: 3px solid {t["toast_success_icon_bg"]};
 }}
 
 QFrame#NotificationRow[level="warning"] {{
     border-left: 3px solid {t["toast_warning_icon_bg"]};
+}}
+
+QLabel#DetailLinkHint {{
+    color: {t["icon_active"]};
+    font-size: 11px;
+    font-weight: 700;
+    background: transparent;
+}}
+
+QDialog#NotificationDetailDialog {{
+    background-color: {t["surface"]};
+}}
+
+QFrame#DetailCard {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 {t["glass_popover_top"]},
+        stop:1 {t["glass_popover_bot"]}
+    );
+    border-radius: 16px;
+    border-top: 1px solid {t["glass_rim_top"]};
+    border-left: 1px solid {t["glass_rim_left"]};
+    border-right: 1px solid {t["glass_rim_right"]};
+    border-bottom: 1px solid {t["glass_rim_bot"]};
+}}
+
+QTextEdit#DetailLogBox {{
+    font-family: {FONT_STACK_MONO};
+    font-size: 11.5px;
+    color: {t["text_primary"]};
+    background-color: {t["input_bg"]};
+    border: 1px solid {t["input_border"]};
+    border-radius: 12px;
+    padding: 10px 12px;
+    selection-background-color: {t["primary"]};
+    selection-color: #ffffff;
 }}
 
 QPushButton#GhostLinkButton {{
@@ -559,6 +604,26 @@ QLabel#HistoryStatusBadge[status="cancelled"] {{
     color: {t["status_cancel_text"]};
 }}
 
+QLabel#HistoryTypeBadge {{
+    font-family: {FONT_STACK_SANS};
+    font-size: 10.5px;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 2px 8px;
+}}
+
+QLabel#HistoryTypeBadge[item_type="app"] {{
+    background-color: {t["pill_features_bg"]};
+    border: 1px solid {t["pill_features_border"]};
+    color: {t["pill_features_text"]};
+}}
+
+QLabel#HistoryTypeBadge[item_type="driver"] {{
+    background-color: {t["pill_patch_bg"]};
+    border: 1px solid {t["pill_patch_border"]};
+    color: {t["pill_patch_text"]};
+}}
+
 QPushButton#IconButton {{
     background-color: {t["secondary_bg"]};
     border-top: 1px solid {t["glass_rim_top"]};
@@ -749,6 +814,35 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
     background: none;
     height: 0px;
+    border: none;
+}}
+
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 8px;
+    margin: 0 4px 0 4px;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {t["scroll_handle"]};
+    min-width: 32px;
+    border-radius: 4px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: {t["scroll_handle_hover"]};
+}}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
+    width: 0px;
+    border: none;
+}}
+
+QAbstractScrollArea::corner {{
+    background: transparent;
+    border: none;
 }}
 
 QFrame#StatusToast {{
@@ -777,7 +871,7 @@ QFrame#StatusToast[level="warning"] {{
 }}
 
 QLabel#ToastIcon {{
-    border-radius: 13px;
+    border-radius: 8px;
     font-weight: 700;
     font-size: 13px;
 }}

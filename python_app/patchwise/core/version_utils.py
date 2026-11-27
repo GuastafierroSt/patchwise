@@ -47,4 +47,8 @@ def is_update_available(installed_version: str, latest_version: str) -> bool:
     """Return True strictly when latest_version is newer than installed_version."""
     if not installed_version or not latest_version:
         return False
-    return compare_versions(installed_version, latest_version) < 0
+    cleaned_installed = installed_version.strip()
+    if cleaned_installed.startswith("<"):
+        # Winget uses "< X.Y.Z" when the installed version is strictly lower than X.Y.Z
+        return compare_versions(cleaned_installed, latest_version) <= 0
+    return compare_versions(cleaned_installed, latest_version) < 0

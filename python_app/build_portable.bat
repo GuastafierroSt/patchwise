@@ -80,6 +80,11 @@ if errorlevel 1 (
 )
 
 echo [4/4] Compilazione eseguibile portable single-file...
+taskkill /IM PatchWise_Portable.exe /F /T >nul 2>nul
+if not errorlevel 1 (
+    echo Chiusa istanza precedente di PatchWise_Portable.exe...
+    timeout /t 1 /nobreak >nul
+)
 "%VENV_PY%" build_portable.py --name PatchWise_Portable
 if errorlevel 1 (
     echo [ERRORE] Compilazione eseguibile fallita.

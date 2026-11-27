@@ -47,7 +47,9 @@ class UpdateManagerController:
         checker: Optional[VersionChecker] = None,
         updaters: Optional[Sequence[AppUpdater]] = None,
         history: Optional[StatelessSessionHistoryManager] = None,
+        item_type: str = "app",
     ) -> None:
+        self._item_type = item_type
         self._detector = detector or CompositeAppDetector(
             [WingetDetector(), WindowsRegistryDetector()]
         )
@@ -63,6 +65,10 @@ class UpdateManagerController:
         self.candidates: List[UpdateCandidate] = []
         self.last_scan_at: Optional[str] = None
         self._active_control: Optional[UpdateControlToken] = None
+
+    @property
+    def item_type(self) -> str:
+        return self._item_type
 
     @property
     def history(self) -> StatelessSessionHistoryManager:
@@ -101,6 +107,7 @@ class UpdateManagerController:
                 status="failed",
                 duration_seconds=0.1,
                 error_message="Nessun provider di installazione compatibile trovato.",
+                item_type=candidate.app.item_type,
             )
             self._history.record_update(record)
             return record
@@ -159,7 +166,9 @@ class UpdateManagerController:
             "pending_updates": len(pending),
             "critical_updates": critical,
             "updated_this_session": sum(
-                1 for r in self._history.get_current_session_records() if r.status == "success"
+                1
+                for r in self._history.get_current_session_records()
+                if r.status == "success" and r.item_type == self._item_type
             ),
         }
 

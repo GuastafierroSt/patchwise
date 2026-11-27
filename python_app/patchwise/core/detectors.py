@@ -240,5 +240,9 @@ class CompositeAppDetector(AppDetector):
                         install_location=existing.install_location or app.install_location,
                         winget_id=existing.winget_id or app.winget_id,
                         github_repo=existing.github_repo or app.github_repo,
+                        item_type=existing.item_type or app.item_type,
+                        device_class=existing.device_class or app.device_class,
+                        hardware_id=existing.hardware_id or app.hardware_id,
+                        driver_update_id=existing.driver_update_id or app.driver_update_id,
                     )
         return sorted(merged.values(), key=lambda item: item.name.lower())

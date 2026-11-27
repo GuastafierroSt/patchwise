@@ -28,16 +28,20 @@ class UpdatePhase(str, Enum):
 
 @dataclass(frozen=True)
 class InstalledApp:
-    """Represents an application detected on the local machine."""
+    """Represents an application or hardware driver detected on the local machine."""
 
     app_id: str
     name: str
     publisher: str
     installed_version: str
-    source: str  # "registry" | "winget"
+    source: str  # "registry" | "winget" | "driver-registry" | "driver-cim" | "windows-update-driver"
     install_location: str = ""
     winget_id: Optional[str] = None
     github_repo: Optional[str] = None
+    item_type: str = "app"  # "app" | "driver"
+    device_class: str = ""
+    hardware_id: str = ""
+    driver_update_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,8 @@ class UpdateRecord:
         default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
     error_message: str = ""
+    item_type: str = "app"  # "app" | "driver"
+    error_details: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -126,6 +132,8 @@ class UpdateRecord:
             "duration_seconds": self.duration_seconds,
             "completed_at": self.completed_at,
             "error_message": self.error_message,
+            "item_type": self.item_type,
+            "error_details": self.error_details,
         }
 
     @classmethod
@@ -143,4 +151,6 @@ class UpdateRecord:
             duration_seconds=float(data.get("duration_seconds", 0.0)),
             completed_at=str(data.get("completed_at", "")),
             error_message=str(data.get("error_message", "")),
+            item_type=str(data.get("item_type", "app")),
+            error_details=str(data.get("error_details", "")),
         )

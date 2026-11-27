@@ -1,4 +1,4 @@
-"""Main desktop window class for PatchWise Software Updater."""
+"""Main desktop window class for PatchWise Software & Driver Updater (v3.0)."""
 
 from __future__ import annotations
 
@@ -11,14 +11,12 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPoint,
     QPropertyAnimation,
-    QRect,
     QSize,
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QCloseEvent, QKeyEvent, QPixmap, QRegion, QResizeEvent
+from PySide6.QtGui import QCloseEvent, QKeyEvent, QResizeEvent
 from PySide6.QtWidgets import (
-    QApplication,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
@@ -34,74 +32,93 @@ from PySide6.QtWidgets import (
 
 from patchwise import __version__
 from patchwise.core.controller import UpdateManagerController
-from patchwise.models import DownloadProgress, UpdateCandidate, UpdatePhase, UpdateRecord
+from patchwise.core.drivers import (
+    WindowsUpdateDriverChecker,
+    WindowsUpdateDriverUpdater,
+    create_default_driver_detector,
+)
+from patchwise.models import DownloadProgress, UpdateCandidate, UpdateRecord
 from patchwise.ui.icons import (
     load_app_icon,
     load_brand_pixmap,
     make_dashboard_icon,
     make_download_icon,
+    make_driver_icon,
     make_history_icon,
     make_refresh_icon,
     make_sidebar_toggle_icon,
     make_theme_icon,
+)
+from patchwise.ui.section_view import (
+    APPS_SECTION_CONFIG,
+    DRIVERS_SECTION_CONFIG,
+    UpdateSectionView,
 )
 from patchwise.ui.theme import get_theme_qss, get_theme_tokens
 from patchwise.ui.widgets import (
     ActiveDownloadBanner,
     AnimatedChevronButton,
     AppUpdateCard,
-    GlassSheetTransitionOverlay,
     HistoryRowWidget,
     LiquidGlassBackdrop,
     ModernToggleSwitch,
     NotificationBellButton,
+    NotificationDetailDialog,
     NotificationItem,
     NotificationsPopover,
     StatusNotificationBanner,
 )
-from patchwise.ui.workers import ScanWorker, UpdateWorker
 
 
 class PatchWiseMainWindow(QMainWindow):
-    """Primary PySide6 desktop shell coordinating scan, updates, progress, and session history."""
+    """Primary PySide6 desktop shell coordinating Apps updates, Driver updates, and history."""
 
     SIDEBAR_WIDTH = 268
     MAX_NOTIFICATIONS = 50
 
-    def __init__(self, controller: Optional[UpdateManagerController] = None) -> None:
+    def __init__(
+        self,
+        controller: Optional[UpdateManagerController] = None,
+        driver_controller: Optional[UpdateManagerController] = None,
+    ) -> None:
         super().__init__()
-        self.controller = controller or UpdateManagerController()
-        self._scan_worker: Optional[ScanWorker] = None
-        self._update_worker: Optional[UpdateWorker] = None
-        self._card_map: Dict[str, AppUpdateCard] = {}
-        self._pending_rescan: bool = False
+        self.controller = controller or UpdateManagerController(item_type="app")
+        self.driver_controller = driver_controller or UpdateManagerController(
+            detector=create_default_driver_detector(),
+            checker=WindowsUpdateDriverChecker(),
+            updaters=[WindowsUpdateDriverUpdater()],
+            history=self.controller.history,
+            item_type="driver",
+        )
+
         self._theme: str = "light"
         self._sidebar_open: bool = True
-        self._updates_expanded: bool = False
         self._sidebar_anim: Optional[QPropertyAnimation] = None
-        self._updates_anim: Optional[QPropertyAnimation] = None
-        self._updates_anim_timer = QTimer(self)
-        self._updates_anim_timer.setSingleShot(True)
-        self._updates_anim_timer.timeout.connect(self._start_pending_updates_anim)
         self._page_fade_anim: Optional[QPropertyAnimation] = None
         self._theme_fade_overlay: Optional[QLabel] = None
         self._theme_fade_anim: Optional[QPropertyAnimation] = None
         self._notifications: List[NotificationItem] = []
+        self._active_detail_dialog: Optional[NotificationDetailDialog] = None
 
-        self.setWindowTitle(f"PatchWise Desktop — Software Updater v{__version__} (Portable)")
+        self.setWindowTitle(
+            f"PatchWise Desktop — Software & Driver Updater v{__version__} (Portable)"
+        )
         self.setWindowIcon(load_app_icon())
         self.resize(1240, 820)
 
         self._build_layout()
-        self.notification_banner = StatusNotificationBanner(self)
+        self.notification_banner = StatusNotificationBanner(
+            self,
+            on_click=self.open_notification_detail,
+        )
         self.notifications_popover = NotificationsPopover(
             on_clear=self.clear_notifications,
+            on_select=self.open_notification_detail,
             parent=self,
         )
         self.set_theme("light", animate=False)
         self._refresh_history_views()
-        self._refresh_summary_chips()
-        self._refresh_selection_controls()
+        self._sync_topbar_for_active_section()
 
     @property
     def current_theme(self) -> str:
@@ -112,8 +129,44 @@ class PatchWiseMainWindow(QMainWindow):
         return self._sidebar_open
 
     @property
+    def active_section(self) -> Optional[UpdateSectionView]:
+        if not hasattr(self, "stack"):
+            return None
+        idx = self.stack.currentIndex()
+        if idx == 0:
+            return self.apps_section
+        if idx == 1:
+            return self.drivers_section
+        return None
+
+    # Compatibility accessors delegating to the primary Apps section
+    @property
+    def download_banner(self) -> ActiveDownloadBanner:
+        return self.apps_section.download_banner
+
+    @property
+    def updates_body(self) -> QFrame:
+        return self.apps_section.updates_card
+
+    @property
     def is_updates_expanded(self) -> bool:
-        return self._updates_expanded
+        return self.apps_section.is_expanded
+
+    @property
+    def expand_updates_btn(self) -> AnimatedChevronButton:
+        return self.apps_section.expand_updates_btn
+
+    @property
+    def select_all_btn(self) -> QPushButton:
+        return self.apps_section.select_all_btn
+
+    @property
+    def _card_map(self) -> Dict[str, AppUpdateCard]:
+        return self.apps_section._card_map
+
+    @property
+    def _updates_anim(self) -> Optional[QPropertyAnimation]:
+        return self.apps_section._updates_anim
 
     @property
     def notification_items(self) -> List[NotificationItem]:
@@ -156,7 +209,7 @@ class PatchWiseMainWindow(QMainWindow):
         brand_text_col.setSpacing(1)
         brand = QLabel("PatchWise")
         brand.setObjectName("BrandTitle")
-        subtitle = QLabel("Portable Software Updater")
+        subtitle = QLabel(f"Software & Driver · v{__version__}")
         subtitle.setObjectName("MutedText")
         brand_text_col.addWidget(brand)
         brand_text_col.addWidget(subtitle)
@@ -176,9 +229,11 @@ class PatchWiseMainWindow(QMainWindow):
         nav_heading.setObjectName("NavGroupLabel")
         sb_layout.addWidget(nav_heading)
 
-        self.nav_dashboard = self._make_nav_button("Dashboard && Aggiornamenti", 0, active=True)
-        self.nav_history = self._make_nav_button("Cronologia di Sessione", 1, active=False)
+        self.nav_dashboard = self._make_nav_button("Aggiornamenti App", 0, active=True)
+        self.nav_drivers = self._make_nav_button("Aggiornamenti Driver", 1, active=False)
+        self.nav_history = self._make_nav_button("Cronologia di Sessione", 2, active=False)
         sb_layout.addWidget(self.nav_dashboard)
+        sb_layout.addWidget(self.nav_drivers)
         sb_layout.addWidget(self.nav_history)
         sb_layout.addStretch()
 
@@ -221,9 +276,27 @@ class PatchWiseMainWindow(QMainWindow):
         self.top_bar = self._build_top_bar()
         right_layout.addWidget(self.top_bar)
 
+        self.apps_section = UpdateSectionView(
+            controller=self.controller,
+            config=APPS_SECTION_CONFIG,
+            on_notify=self.show_notification,
+            on_history_changed=self._refresh_history_views,
+            on_controls_changed=self._sync_topbar_for_active_section,
+            on_request_scan=lambda: self.start_scan(),
+        )
+        self.drivers_section = UpdateSectionView(
+            controller=self.driver_controller,
+            config=DRIVERS_SECTION_CONFIG,
+            on_notify=self.show_notification,
+            on_history_changed=self._refresh_history_views,
+            on_controls_changed=self._sync_topbar_for_active_section,
+            on_request_scan=lambda: self.start_driver_scan(),
+        )
+
         self.stack = QStackedWidget()
         self.stack.setObjectName("GlassStack")
-        self.stack.addWidget(self._build_dashboard_page())
+        self.stack.addWidget(self.apps_section)
+        self.stack.addWidget(self.drivers_section)
         self.stack.addWidget(self._build_history_page())
         right_layout.addWidget(self.stack, stretch=1)
 
@@ -252,27 +325,27 @@ class PatchWiseMainWindow(QMainWindow):
         self.topbar_logo.setPixmap(load_brand_pixmap(28))
         self.topbar_logo.setVisible(False)
 
-        self.topbar_title = QLabel("Dashboard & Aggiornamenti")
+        self.topbar_title = QLabel(APPS_SECTION_CONFIG.page_title)
         self.topbar_title.setObjectName("TopBarPageTitle")
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchInput")
-        self.search_input.setPlaceholderText("Cerca programmi installati o aggiornamenti...")
+        self.search_input.setPlaceholderText(APPS_SECTION_CONFIG.search_placeholder)
         self.search_input.setMinimumWidth(240)
         self.search_input.setMaximumWidth(400)
-        self.search_input.textChanged.connect(self._render_candidates)
+        self.search_input.textChanged.connect(self._on_search_changed)
 
         self.scan_btn = QPushButton("Nuova Scansione")
         self.scan_btn.setObjectName("SecondaryButton")
         self.scan_btn.setIconSize(QSize(15, 15))
         self.scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.scan_btn.clicked.connect(self.start_scan)
+        self.scan_btn.clicked.connect(self._on_scan_clicked)
 
         self.update_all_btn = QPushButton("Aggiorna selezionate")
         self.update_all_btn.setObjectName("PrimaryButton")
         self.update_all_btn.setIconSize(QSize(15, 15))
         self.update_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_all_btn.clicked.connect(self.start_batch_update)
+        self.update_all_btn.clicked.connect(self._on_batch_update_clicked)
 
         self.notifications_btn = NotificationBellButton()
         self.notifications_btn.clicked.connect(self.toggle_notifications_panel)
@@ -299,25 +372,64 @@ class PatchWiseMainWindow(QMainWindow):
     def _switch_page(self, index: int) -> None:
         previous = self.stack.currentIndex()
         self.stack.setCurrentIndex(index)
-        for idx, btn in enumerate((self.nav_dashboard, self.nav_history)):
+        for idx, btn in enumerate((self.nav_dashboard, self.nav_drivers, self.nav_history)):
             btn.setProperty("active", idx == index)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
-        is_dashboard = index == 0
-        self.topbar_title.setText(
-            "Dashboard & Aggiornamenti" if is_dashboard else "Cronologia di Sessione"
-        )
-        self.search_input.setVisible(is_dashboard)
-        self.scan_btn.setVisible(is_dashboard)
-        self.update_all_btn.setVisible(is_dashboard)
+        self._sync_topbar_for_active_section()
         self._refresh_icons()
 
-        if index == 1:
+        if index == 2:
             self._refresh_history_views()
 
         if previous != index and self.isVisible():
             self._animate_page_fade(self.stack.currentWidget())
+
+    def _sync_topbar_for_active_section(self) -> None:
+        if not hasattr(self, "stack"):
+            return
+        section = self.active_section
+        if section is None:
+            self.topbar_title.setText("Cronologia di Sessione")
+            self.search_input.setVisible(False)
+            self.scan_btn.setVisible(False)
+            self.update_all_btn.setVisible(False)
+            return
+
+        self.topbar_title.setText(section.config.page_title)
+        self.search_input.setVisible(True)
+        self.search_input.setPlaceholderText(section.config.search_placeholder)
+        if self.search_input.text() != section.search_query:
+            self.search_input.blockSignals(True)
+            self.search_input.setText(section.search_query)
+            self.search_input.blockSignals(False)
+
+        scan_label, scan_enabled = section.get_scan_button_state()
+        self.scan_btn.setVisible(True)
+        self.scan_btn.setText(scan_label)
+        self.scan_btn.setEnabled(scan_enabled)
+
+        cta_label, cta_enabled = section.get_primary_cta_state()
+        self.update_all_btn.setVisible(True)
+        self.update_all_btn.setText(cta_label)
+        self.update_all_btn.setEnabled(cta_enabled)
+
+    def _on_search_changed(self, text: str) -> None:
+        section = self.active_section
+        if section is not None:
+            section.set_search_query(text)
+
+    def _on_scan_clicked(self) -> None:
+        if self.stack.currentIndex() == 1:
+            self.start_driver_scan()
+        else:
+            self.start_scan()
+
+    def _on_batch_update_clicked(self) -> None:
+        section = self.active_section
+        if section is not None:
+            section.start_batch_update()
 
     def _animate_page_fade(self, page: Optional[QWidget]) -> None:
         if page is None:
@@ -383,172 +495,30 @@ class PatchWiseMainWindow(QMainWindow):
         )
         self._refresh_icons()
 
+    # Delegated Apps-section convenience methods (keep public API & tests compatible)
+    def start_scan(self) -> None:
+        self.apps_section.start_scan()
+
+    def start_driver_scan(self) -> None:
+        self.drivers_section.start_scan()
+
     def toggle_updates_list(self) -> None:
-        self.set_updates_expanded(not self._updates_expanded, animate=True)
-
-    def _compute_updates_card_rect(self) -> QRect:
-        """Compute the exact pixel rectangle where the separate UpdatesListCard sits."""
-        margins = self.dashboard_layout.contentsMargins()
-        spacing = self.dashboard_layout.spacing()
-        page_w = max(360, self.dashboard_page.width())
-        page_h = max(360, self.dashboard_page.height())
-
-        top_y = self.hero_card.geometry().bottom() + 1 + spacing
-        if self.download_banner.isVisible():
-            dl_bottom = self.download_banner.geometry().bottom() + 1
-            if dl_bottom > top_y:
-                top_y = dl_bottom + spacing
-            else:
-                top_y += max(self.download_banner.height(), self.download_banner.sizeHint().height()) + spacing
-
-        w = max(320, page_w - margins.left() - margins.right())
-        h = max(200, page_h - margins.bottom() - top_y)
-        return QRect(margins.left(), top_y, w, h)
-
-    def _capture_updates_card_snapshot(self, rect: QRect) -> QPixmap:
-        """Render the entire Liquid Glass UpdatesListCard once into a transparent HiDPI pixmap."""
-        w = max(1, rect.width())
-        h = max(1, rect.height())
-        dpr = max(1.0, float(self.devicePixelRatioF()))
-
-        pixmap = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
-        pixmap.setDevicePixelRatio(dpr)
-        pixmap.fill(Qt.GlobalColor.transparent)
-
-        was_visible = self.updates_card.isVisible()
-        if not was_visible:
-            # Synchronous show -> offscreen render -> hide within one tick (zero screen flash)
-            self.updates_card.setFixedSize(w, h)
-            self.updates_card.setVisible(True)
-            if self.updates_card.layout() is not None:
-                self.updates_card.layout().activate()
-            self.updates_scroll.viewport().resize(
-                max(1, self.updates_scroll.width()),
-                max(1, self.updates_scroll.height()),
-            )
-            if self.updates_container.layout() is not None:
-                self.updates_container.layout().activate()
-            QApplication.sendPostedEvents(None, 0)
-            self.updates_card.render(pixmap, QPoint(0, 0), QRegion(0, 0, w, h))
-            self.updates_card.setVisible(False)
-            self.updates_card.setMinimumSize(0, 0)
-            self.updates_card.setMaximumSize(16777215, 16777215)
-        else:
-            self.updates_card.render(pixmap, QPoint(0, 0), QRegion(0, 0, w, h))
-
-        return pixmap
+        self.apps_section.toggle_updates_list()
 
     def set_updates_expanded(self, expanded: bool, animate: bool = True) -> None:
-        self._updates_expanded = expanded
-        use_anim = animate and self.isVisible()
+        self.apps_section.set_updates_expanded(expanded, animate=animate)
 
-        self._updates_anim_timer.stop()
-        if self._updates_anim is not None:
-            self._updates_anim.stop()
+    def _on_scan_finished(self, candidates: List[UpdateCandidate]) -> None:
+        self.apps_section.on_scan_finished(candidates)
 
-        self.expand_updates_btn.set_expanded(expanded, animate=use_anim)
-        self.expand_updates_btn.setToolTip(
-            "Nascondi elenco applicazioni" if expanded else "Espandi elenco applicazioni"
-        )
+    def _on_progress_changed(self, progress: DownloadProgress) -> None:
+        self.apps_section.on_progress_changed(progress)
 
-        if not use_anim:
-            self._updates_overlay.hide()
-            self._updates_overlay.progress = 1.0 if expanded else 0.0
-            self.updates_card.setVisible(expanded)
-            self._dashboard_spacer.setVisible(not expanded)
-            self.dashboard_layout.setStretchFactor(self.updates_card, 1 if expanded else 0)
-            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0 if expanded else 1)
-            self._reposition_overlays()
-            return
+    def _on_item_completed(self, record: UpdateRecord) -> None:
+        self.apps_section.on_item_completed(record)
 
-        if expanded:
-            target_rect = self._compute_updates_card_rect()
-            if self._updates_overlay.isVisible():
-                start_p = self._updates_overlay.progress
-            else:
-                start_p = 0.0
-                snapshot = self._capture_updates_card_snapshot(target_rect)
-                self._updates_overlay.set_snapshot(snapshot)
-                self._updates_overlay.progress = 0.0
-
-            self.updates_card.setVisible(False)
-            self._dashboard_spacer.setVisible(True)
-            self.dashboard_layout.setStretchFactor(self.updates_card, 0)
-            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-
-            self._updates_overlay.setGeometry(target_rect)
-            self._updates_overlay.show()
-            self._updates_overlay.raise_()
-
-            anim = QPropertyAnimation(self._updates_overlay, b"progress", self)
-            anim.setDuration(380)
-            anim.setStartValue(start_p)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.Type.OutQuint)
-            anim.finished.connect(self._on_updates_expand_finished)
-            self._updates_anim = anim
-            self._updates_anim_timer.start(0)
-        else:
-            if self._updates_overlay.isVisible():
-                start_p = self._updates_overlay.progress
-            elif self.updates_card.isVisible() and self.updates_card.height() > 0:
-                card_rect = self.updates_card.geometry()
-                snapshot = self._capture_updates_card_snapshot(card_rect)
-                self._updates_overlay.set_snapshot(snapshot)
-                self._updates_overlay.setGeometry(card_rect)
-                self._updates_overlay.progress = 1.0
-                start_p = 1.0
-            else:
-                self._updates_overlay.hide()
-                self._updates_overlay.progress = 0.0
-                self.updates_card.setVisible(False)
-                self._dashboard_spacer.setVisible(True)
-                self.dashboard_layout.setStretchFactor(self.updates_card, 0)
-                self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-                self._reposition_overlays()
-                return
-
-            self.updates_card.setVisible(False)
-            self._dashboard_spacer.setVisible(True)
-            self.dashboard_layout.setStretchFactor(self.updates_card, 0)
-            self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-            self._updates_overlay.show()
-            self._updates_overlay.raise_()
-
-            anim = QPropertyAnimation(self._updates_overlay, b"progress", self)
-            anim.setDuration(310)
-            anim.setStartValue(start_p)
-            anim.setEndValue(0.0)
-            anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
-            anim.finished.connect(self._on_updates_collapse_finished)
-            self._updates_anim = anim
-            self._updates_anim_timer.start(0)
-
-    def _start_pending_updates_anim(self) -> None:
-        if self._updates_anim is not None:
-            self._updates_anim.start()
-
-    def _on_updates_expand_finished(self) -> None:
-        if not self._updates_expanded:
-            return
-        self._updates_overlay.hide()
-        self._updates_overlay.progress = 1.0
-        self._dashboard_spacer.setVisible(False)
-        self.updates_card.setVisible(True)
-        self.dashboard_layout.setStretchFactor(self.updates_card, 1)
-        self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 0)
-        self._reposition_overlays()
-
-    def _on_updates_collapse_finished(self) -> None:
-        if self._updates_expanded:
-            return
-        self._updates_overlay.hide()
-        self._updates_overlay.progress = 0.0
-        self.updates_card.setVisible(False)
-        self._dashboard_spacer.setVisible(True)
-        self.dashboard_layout.setStretchFactor(self.updates_card, 0)
-        self.dashboard_layout.setStretchFactor(self._dashboard_spacer, 1)
-        self._reposition_overlays()
+    def _on_batch_finished(self, records: List[UpdateRecord]) -> None:
+        self.apps_section.on_batch_finished(records)
 
     def toggle_notifications_panel(self) -> None:
         if self.notifications_popover.isVisible():
@@ -600,7 +570,6 @@ class PatchWiseMainWindow(QMainWindow):
         self.update()
 
     def _play_theme_crossfade(self, old_snapshot) -> None:
-        """Crossfade smoothly from the previous theme snapshot into the new theme."""
         if self._theme_fade_anim is not None:
             self._theme_fade_anim.stop()
         if self._theme_fade_overlay is not None:
@@ -646,14 +615,18 @@ class PatchWiseMainWindow(QMainWindow):
             make_sidebar_toggle_icon(icon_default, sidebar_open=self._sidebar_open, size=18)
         )
         self.notifications_btn.set_bell_color(icon_default)
-        self.expand_updates_btn.set_chevron_color(icon_default)
+        self.apps_section.set_icon_color(icon_default)
+        self.drivers_section.set_icon_color(icon_default)
 
-        is_dash = self.stack.currentIndex() == 0
+        active_idx = self.stack.currentIndex()
         self.nav_dashboard.setIcon(
-            make_dashboard_icon(icon_active if is_dash else icon_muted, size=16)
+            make_dashboard_icon(icon_active if active_idx == 0 else icon_muted, size=16)
+        )
+        self.nav_drivers.setIcon(
+            make_driver_icon(icon_active if active_idx == 1 else icon_muted, size=16)
         )
         self.nav_history.setIcon(
-            make_history_icon(icon_muted if is_dash else icon_active, size=16)
+            make_history_icon(icon_active if active_idx == 2 else icon_muted, size=16)
         )
         self.scan_btn.setIcon(make_refresh_icon(icon_default, size=15))
         self.update_all_btn.setIcon(make_download_icon("#ffffff", size=15))
@@ -666,7 +639,6 @@ class PatchWiseMainWindow(QMainWindow):
         self.theme_icon_label.setPixmap(theme_icon.pixmap(16, 16))
 
     def _apply_windows_titlebar_theme(self, dark: bool) -> None:
-        """Sync native Windows 10/11 window title bar with Light/Dark theme."""
         if not sys.platform.startswith("win"):
             return
         try:
@@ -676,122 +648,6 @@ class PatchWiseMainWindow(QMainWindow):
             dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
         except Exception:  # noqa: BLE001
             pass
-
-    def _build_dashboard_page(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("GlassPage")
-        self.dashboard_page = page
-        self.dashboard_layout = QVBoxLayout(page)
-        self.dashboard_layout.setContentsMargins(26, 22, 26, 22)
-        self.dashboard_layout.setSpacing(16)
-
-        # SECTION 1: Compact Liquid Glass summary card (fixed height — never thrashes layout)
-        self.hero_card = QFrame()
-        self.hero_card.setObjectName("HeroCard")
-        hero_layout = QVBoxLayout(self.hero_card)
-        hero_layout.setContentsMargins(22, 18, 22, 18)
-        hero_layout.setSpacing(0)
-
-        self.hero_header_widget = QWidget()
-        self.hero_header_widget.setObjectName("TransparentContainer")
-        hero_header = QHBoxLayout(self.hero_header_widget)
-        hero_header.setContentsMargins(0, 0, 0, 0)
-        hero_header.setSpacing(14)
-
-        title_col = QVBoxLayout()
-        title_col.setSpacing(4)
-        self.hero_headline = QLabel("Pronto per la scansione del sistema")
-        self.hero_headline.setObjectName("Headline")
-        self.hero_subtitle = QLabel(
-            "Premi 'Nuova Scansione' per rilevare le app sul PC e confrontarle con le versioni online."
-        )
-        self.hero_subtitle.setObjectName("MutedText")
-        title_col.addWidget(self.hero_headline)
-        title_col.addWidget(self.hero_subtitle)
-
-        chips_row = QHBoxLayout()
-        chips_row.setSpacing(8)
-        self.chip_installed = QLabel("0 app rilevate")
-        self.chip_installed.setObjectName("StatChip")
-        self.chip_pending = QLabel("0 disponibili")
-        self.chip_pending.setObjectName("StatChip")
-        self.chip_updated = QLabel("0 aggiornate")
-        self.chip_updated.setObjectName("StatChip")
-        for chip in (self.chip_installed, self.chip_pending, self.chip_updated):
-            chips_row.addWidget(chip, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        self.expand_updates_btn = AnimatedChevronButton()
-        self.expand_updates_btn.setToolTip("Espandi elenco applicazioni")
-        self.expand_updates_btn.clicked.connect(self.toggle_updates_list)
-
-        hero_header.addLayout(title_col, stretch=1)
-        hero_header.addLayout(chips_row)
-        hero_header.addWidget(self.expand_updates_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
-        hero_layout.addWidget(self.hero_header_widget)
-
-        # Standalone active download section directly below the summary card,
-        # visible ONLY while a download/update is in progress.
-        self.download_banner = ActiveDownloadBanner(
-            on_pause_toggle=self._toggle_pause,
-            on_cancel=self._cancel_active_update,
-        )
-
-        # SECTION 2: Separate Liquid Glass card dedicated to the apps list
-        self.updates_card = QFrame()
-        self.updates_card.setObjectName("UpdatesListCard")
-        self.updates_body = self.updates_card  # Alias for compatibility
-        list_card_layout = QVBoxLayout(self.updates_card)
-        list_card_layout.setContentsMargins(20, 16, 20, 16)
-        list_card_layout.setSpacing(12)
-
-        selection_row = QHBoxLayout()
-        selection_row.setSpacing(10)
-        list_title = QLabel("Applicazioni da aggiornare")
-        list_title.setObjectName("SectionTitle")
-
-        self.select_all_btn = QPushButton("Seleziona tutto")
-        self.select_all_btn.setObjectName("CompactButton")
-        self.select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.select_all_btn.clicked.connect(self.toggle_select_all)
-
-        self.selection_summary_label = QLabel("")
-        self.selection_summary_label.setObjectName("MutedText")
-
-        selection_row.addWidget(list_title)
-        selection_row.addSpacing(6)
-        selection_row.addWidget(self.selection_summary_label)
-        selection_row.addStretch()
-        selection_row.addWidget(self.select_all_btn)
-        list_card_layout.addLayout(selection_row)
-
-        list_divider = QFrame()
-        list_divider.setObjectName("SidebarDivider")
-        list_card_layout.addWidget(list_divider)
-
-        self.updates_scroll = QScrollArea()
-        self.updates_scroll.setWidgetResizable(True)
-        self.updates_container = QWidget()
-        self.updates_layout = QVBoxLayout(self.updates_container)
-        self.updates_layout.setContentsMargins(0, 2, 4, 2)
-        self.updates_layout.setSpacing(10)
-        self.updates_layout.addStretch()
-        self.updates_scroll.setWidget(self.updates_container)
-        list_card_layout.addWidget(self.updates_scroll, stretch=1)
-
-        self.updates_card.setVisible(False)
-
-        self._dashboard_spacer = QWidget()
-        self._dashboard_spacer.setObjectName("TransparentContainer")
-
-        self.dashboard_layout.addWidget(self.hero_card, stretch=0)
-        self.dashboard_layout.addWidget(self.download_banner, stretch=0)
-        self.dashboard_layout.addWidget(self.updates_card, stretch=0)
-        self.dashboard_layout.addWidget(self._dashboard_spacer, stretch=1)
-
-        # Floating zero-layout 60fps transition overlay for UpdatesListCard
-        self._updates_overlay = GlassSheetTransitionOverlay(page)
-
-        return page
 
     def _build_history_page(self) -> QWidget:
         page = QWidget()
@@ -803,8 +659,8 @@ class PatchWiseMainWindow(QMainWindow):
         header = QLabel("Cronologia Aggiornamenti (Stateless)")
         header.setObjectName("Headline")
         desc = QLabel(
-            "Mostra gli aggiornamenti della sessione attiva in RAM e, al riavvio, "
-            "solo il riepilogo dell'ultima sessione chiusa."
+            "Mostra gli aggiornamenti di applicazioni e driver della sessione attiva in RAM e, "
+            "al riavvio, solo il riepilogo dell'ultima sessione chiusa."
         )
         desc.setObjectName("MutedText")
         layout.addWidget(header)
@@ -821,235 +677,77 @@ class PatchWiseMainWindow(QMainWindow):
 
         return page
 
-    def _refresh_summary_chips(self) -> None:
-        metrics = self.controller.get_summary_metrics()
-        self.chip_installed.setText(f"{metrics['total_installed']} app rilevate")
-        self.chip_pending.setText(f"{metrics['pending_updates']} disponibili")
-        self.chip_updated.setText(f"{metrics['updated_this_session']} aggiornate")
+    @property
+    def active_detail_dialog(self) -> Optional[NotificationDetailDialog]:
+        return self._active_detail_dialog
 
-    def start_scan(self) -> None:
-        if self._scan_worker and self._scan_worker.isRunning():
-            return
-        self.scan_btn.setEnabled(False)
-        self.scan_btn.setText("Scansione in corso...")
-        self.hero_headline.setText("Analisi applicazioni installate...")
-        self._scan_worker = ScanWorker(self.controller)
-        self._scan_worker.scan_finished.connect(self._on_scan_finished)
-        self._scan_worker.scan_failed.connect(self._on_scan_failed)
-        self._scan_worker.start()
+    def open_notification_detail(self, item: NotificationItem) -> NotificationDetailDialog:
+        """Open the Liquid Glass diagnostic dialog for a clicked notification or error."""
+        if hasattr(self, "notifications_popover") and self.notifications_popover.isVisible():
+            self.notifications_popover.hide()
+        if self._active_detail_dialog is not None:
+            try:
+                self._active_detail_dialog.close()
+                self._active_detail_dialog.deleteLater()
+            except RuntimeError:
+                pass
+        dialog = NotificationDetailDialog(item, theme=self._theme, parent=self)
+        self._active_detail_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
 
-    def _on_scan_finished(self, candidates: List[UpdateCandidate]) -> None:
-        self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("Nuova Scansione")
-        total = len(self.controller.installed_apps)
-        pending = len(candidates)
-        self.hero_headline.setText(
-            f"{pending} aggiornamenti disponibili trovati"
-            if pending
-            else "Tutte le applicazioni sono aggiornate"
+    def _open_record_detail(self, record: UpdateRecord) -> None:
+        level = "success" if record.status == "success" else "warning"
+        title = (
+            "Dettagli aggiornamento driver"
+            if record.item_type == "driver"
+            else "Dettagli aggiornamento app"
         )
-        self.hero_subtitle.setText(
-            f"Ultima scansione: {self.controller.last_scan_at}  ·  "
-            f"{total} applicazioni rilevate sul PC"
+        category_label = (
+            "Driver · Windows Update" if record.item_type == "driver" else "App · Winget"
         )
-        self._refresh_summary_chips()
-        self._render_candidates()
-        self._refresh_selection_controls()
-        if self._pending_rescan:
-            self._pending_rescan = False
-            self.start_scan()
-
-    def _on_scan_failed(self, error_msg: str) -> None:
-        self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("Nuova Scansione")
-        self.hero_headline.setText("Scansione non riuscita")
-        self.hero_subtitle.setText(error_msg)
-        if self._pending_rescan:
-            self._pending_rescan = False
-            self.start_scan()
-
-    def _render_candidates(self) -> None:
-        while self.updates_layout.count():
-            item = self.updates_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
-
-        self._card_map.clear()
-        query = self.search_input.text().strip().lower()
-        visible = [
-            c
-            for c in self.controller.candidates
-            if not query or query in c.name.lower() or query in c.app.publisher.lower()
-        ]
-
-        if not visible:
-            empty = QLabel("Nessun aggiornamento in sospeso corrispondente al filtro.")
-            empty.setObjectName("MutedText")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setContentsMargins(0, 20, 0, 20)
-            self.updates_layout.addWidget(empty)
-        else:
-            for candidate in visible:
-                card = AppUpdateCard(
-                    candidate=candidate,
-                    on_update_click=self.start_single_update,
-                    on_selection_change=self._on_candidate_selected,
-                )
-                card.set_updating_state(candidate.status)
-                self._card_map[candidate.app_id] = card
-                self.updates_layout.addWidget(card)
-
-        self.updates_layout.addStretch()
-
-    def _actionable_candidates(self) -> List[UpdateCandidate]:
-        return [
-            c
-            for c in self.controller.candidates
-            if c.status != UpdatePhase.COMPLETED and not c.skipped
-        ]
-
-    def _refresh_selection_controls(self) -> None:
-        actionable = self._actionable_candidates()
-        total = len(actionable)
-        selected_count = sum(1 for c in actionable if c.selected)
-        all_selected = total > 0 and selected_count == total
-        is_updating = bool(self._update_worker and self._update_worker.isRunning())
-
-        self.select_all_btn.setText("Deseleziona tutto" if all_selected else "Seleziona tutto")
-        self.select_all_btn.setEnabled(total > 0 and not is_updating)
-
-        if total == 0:
-            self.selection_summary_label.setText("")
-        elif selected_count == 0:
-            self.selection_summary_label.setText("Nessuna app selezionata")
-        else:
-            self.selection_summary_label.setText(f"{selected_count} di {total} selezionate")
-
-        self.update_all_btn.setText("Aggiorna tutto" if all_selected else "Aggiorna selezionate")
-        self.update_all_btn.setEnabled(selected_count > 0 and not is_updating)
-
-    def toggle_select_all(self) -> None:
-        actionable = self._actionable_candidates()
-        if not actionable:
-            return
-        should_select = not all(c.selected for c in actionable)
-        for candidate in actionable:
-            candidate.selected = should_select
-            card = self._card_map.get(candidate.app_id)
-            if card is not None:
-                card.checkbox.blockSignals(True)
-                card.checkbox.setChecked(should_select)
-                card.checkbox.blockSignals(False)
-        self._refresh_selection_controls()
-
-    def _on_candidate_selected(self, candidate: UpdateCandidate, selected: bool) -> None:
-        candidate.selected = selected
-        self._refresh_selection_controls()
-
-    def start_single_update(self, candidate: UpdateCandidate) -> None:
-        self._launch_update_worker([candidate])
-
-    def start_batch_update(self) -> None:
-        selected = [c for c in self._actionable_candidates() if c.selected]
-        if selected:
-            self._launch_update_worker(selected)
-
-    def _launch_update_worker(self, candidates: List[UpdateCandidate]) -> None:
-        if self._update_worker and self._update_worker.isRunning():
-            return
-        self.update_all_btn.setEnabled(False)
-        self.select_all_btn.setEnabled(False)
-        self._update_worker = UpdateWorker(self.controller, candidates)
-        self._update_worker.progress_changed.connect(self._on_progress_changed)
-        self._update_worker.item_completed.connect(self._on_item_completed)
-        self._update_worker.batch_finished.connect(self._on_batch_finished)
-        self._update_worker.start()
-
-    def _on_progress_changed(self, progress: DownloadProgress) -> None:
-        self.download_banner.update_progress(progress)
-        card = self._card_map.get(progress.app_id)
-        if card:
-            card.set_updating_state(progress.phase)
-        self._reposition_overlays()
-
-    def _on_item_completed(self, record: UpdateRecord) -> None:
-        self.download_banner.reset()
-        card = self._card_map.get(record.app_id)
-        if card:
-            phase = (
-                UpdatePhase.COMPLETED
-                if record.status == "success"
-                else UpdatePhase.CANCELLED
-                if record.status == "cancelled"
-                else UpdatePhase.FAILED
+        message = (
+            f"Impossibile aggiornare {record.app_name}: {record.error_message}"
+            if record.status == "failed" and record.error_message
+            else f"{record.app_name} ({record.from_version} → {record.to_version})"
+        )
+        details = record.error_details or (
+            f"Elemento: {record.app_name} ({record.publisher})\n"
+            f"Versione: {record.from_version} → {record.to_version}\n"
+            f"Esito: {record.status}\n"
+            f"Orario: {record.completed_at}\n"
+            f"Durata: {record.duration_seconds:.1f}s\n\n"
+            f"{record.error_message}"
+        )
+        self.open_notification_detail(
+            NotificationItem(
+                title=title,
+                message=message,
+                level=level,
+                timestamp=record.completed_at.split(" ")[-1] if record.completed_at else "",
+                details=details,
+                category_label=category_label,
             )
-            card.set_updating_state(phase)
+        )
 
-        self._refresh_history_views()
-        self._refresh_summary_chips()
-        self._refresh_selection_controls()
-
-        if record.status == "success":
-            self.show_notification(
-                title="Aggiornamento completato",
-                message=f"{record.app_name} aggiornato alla v{record.to_version}.",
-                level="success",
-            )
-        elif record.status == "cancelled":
-            self.show_notification(
-                title="Aggiornamento annullato",
-                message=f"L'aggiornamento di {record.app_name} è stato annullato.",
-                level="warning",
-            )
-        else:
-            detail = f": {record.error_message}" if record.error_message else "."
-            self.show_notification(
-                title="Aggiornamento non riuscito",
-                message=f"Impossibile aggiornare {record.app_name}{detail}",
-                level="warning",
-            )
-
-    def _on_batch_finished(self, records: List[UpdateRecord]) -> None:
-        self.download_banner.reset()
-        self._refresh_selection_controls()
-
-        succeeded = [r for r in records if r.status == "success"]
-        failed = [r for r in records if r.status != "success"]
-
-        if len(records) > 1:
-            if succeeded and not failed:
-                self.show_notification(
-                    title="Aggiornamenti completati",
-                    message=f"{len(succeeded)} applicazioni aggiornate con successo.",
-                    level="success",
-                )
-            elif succeeded and failed:
-                self.show_notification(
-                    title="Aggiornamenti completati con avvisi",
-                    message=(
-                        f"{len(succeeded)} completati, {len(failed)} non riusciti o annullati."
-                    ),
-                    level="warning",
-                )
-            elif failed:
-                self.show_notification(
-                    title="Aggiornamenti non riusciti",
-                    message=f"Nessun aggiornamento completato ({len(failed)} non riusciti o annullati).",
-                    level="warning",
-                )
-
-        if succeeded:
-            if self._scan_worker and self._scan_worker.isRunning():
-                self._pending_rescan = True
-            else:
-                self.start_scan()
-
-    def show_notification(self, title: str, message: str, level: str = "success") -> None:
+    def show_notification(
+        self,
+        title: str,
+        message: str,
+        level: str = "success",
+        details: str = "",
+        category_label: str = "",
+    ) -> None:
         normalized = "success" if level == "success" else "warning"
-        item = NotificationItem(title=title, message=message, level=normalized)
+        item = NotificationItem(
+            title=title,
+            message=message,
+            level=normalized,
+            details=details,
+            category_label=category_label,
+        )
         self._notifications.insert(0, item)
         if len(self._notifications) > self.MAX_NOTIFICATIONS:
             self._notifications = self._notifications[: self.MAX_NOTIFICATIONS]
@@ -1060,7 +758,9 @@ class PatchWiseMainWindow(QMainWindow):
         else:
             self._position_notifications_popover()
 
-        self.notification_banner.show_message(title=title, message=message, level=normalized)
+        self.notification_banner.show_message(
+            title=title, message=message, level=normalized, item=item
+        )
         target = self._compute_notification_pos()
         self.notification_banner.slide_to(target, animate=True)
 
@@ -1071,7 +771,6 @@ class PatchWiseMainWindow(QMainWindow):
             self._position_notifications_popover()
 
     def _compute_notification_pos(self) -> QPoint:
-        """Compute anchored bottom-right position for the discreet feedback toast."""
         content_rect = self.right_container.geometry()
         if content_rect.width() <= 0 or content_rect.height() <= 0:
             content_rect = self.rect()
@@ -1089,7 +788,6 @@ class PatchWiseMainWindow(QMainWindow):
         self.notification_banner.slide_to(target, animate=False)
 
     def _compute_notifications_popover_pos(self) -> QPoint:
-        """Compute anchored position directly below the top-bar bell icon."""
         self.notifications_popover.adjustSize()
         bell_bottom_right = self.notifications_btn.mapTo(
             self, self.notifications_btn.rect().bottomRight()
@@ -1121,18 +819,6 @@ class PatchWiseMainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
-    def _toggle_pause(self) -> None:
-        if not self._update_worker:
-            return
-        if self._update_worker.control.is_paused:
-            self._update_worker.control.resume()
-        else:
-            self._update_worker.control.pause()
-
-    def _cancel_active_update(self) -> None:
-        if self._update_worker:
-            self._update_worker.control.cancel()
-
     def _refresh_history_views(self) -> None:
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
@@ -1154,7 +840,9 @@ class PatchWiseMainWindow(QMainWindow):
             self.history_layout.addWidget(lbl)
         else:
             for rec in current:
-                self.history_layout.addWidget(HistoryRowWidget(rec))
+                self.history_layout.addWidget(
+                    HistoryRowWidget(rec, on_inspect=self._open_record_detail)
+                )
 
         last_title = QLabel(f"Ultima Sessione Chiusa ({len(last)})")
         last_title.setObjectName("SectionTitle")
@@ -1165,10 +853,15 @@ class PatchWiseMainWindow(QMainWindow):
             self.history_layout.addWidget(lbl)
         else:
             for rec in last:
-                self.history_layout.addWidget(HistoryRowWidget(rec))
+                self.history_layout.addWidget(
+                    HistoryRowWidget(rec, on_inspect=self._open_record_detail)
+                )
 
         self.history_layout.addStretch()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.apps_section.shutdown_workers()
+        self.drivers_section.shutdown_workers()
+        self.driver_controller.cancel_active()
         self.controller.shutdown()
         super().closeEvent(event)

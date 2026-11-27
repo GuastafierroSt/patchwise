@@ -6,7 +6,10 @@ Auto-update toggles are strictly excluded from all cards and controls.
 
 from __future__ import annotations
 
+import ctypes
 import math
+import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional, Sequence
@@ -26,7 +29,9 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QIcon,
     QLinearGradient,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -34,7 +39,9 @@ from PySide6.QtGui import (
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -42,6 +49,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -52,7 +60,14 @@ from patchwise.models import (
     UpdatePhase,
     UpdateRecord,
 )
-from patchwise.ui.theme import get_theme_tokens
+from patchwise.ui.icons import (
+    make_alert_icon,
+    make_check_icon,
+    make_close_icon,
+    make_copy_icon,
+    make_download_icon,
+)
+from patchwise.ui.theme import get_theme_qss, get_theme_tokens
 
 _AVATAR_GRADIENTS = (
     ("#0ea5e9", "#685bd9"),  # Logo Cyan -> Violet
@@ -72,6 +87,8 @@ class NotificationItem:
     message: str
     level: str = "success"  # "success" | "warning"
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
+    details: str = ""
+    category_label: str = ""
 
 
 def _extract_initials(name: str) -> str:
@@ -86,6 +103,27 @@ def _extract_initials(name: str) -> str:
 def _is_dark_context(widget: QWidget) -> bool:
     win = widget.window()
     return getattr(win, "current_theme", "light") == "dark"
+
+
+_RGBA_RE = re.compile(
+    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([0-9.]+)\s*)?\)",
+    re.IGNORECASE,
+)
+
+
+def parse_qcolor(value: str) -> QColor:
+    """Parse both hex strings (#RRGGBB) and CSS rgba(r, g, b, a) strings into a valid QColor."""
+    match = _RGBA_RE.fullmatch(value.strip())
+    if match:
+        r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        alpha_raw = match.group(4)
+        if alpha_raw is None:
+            return QColor(r, g, b)
+        alpha_f = float(alpha_raw)
+        alpha_int = int(round(alpha_f * 255)) if alpha_f <= 1.0 else int(round(alpha_f))
+        return QColor(r, g, b, max(0, min(255, alpha_int)))
+    color = QColor(value)
+    return color if color.isValid() else QColor("#ffffff")
 
 
 def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -315,20 +353,20 @@ class ModernCheckBox(QCheckBox):
         rect = QRectF(2.0, 2.0, 18.0, 18.0)
         p = max(0.0, min(1.0, self._check_progress))
 
-        # Unchecked base box
+        # Unchecked base box (uses parse_qcolor so rgba() light/dark fills render accurately)
         border_color = tokens["checkbox_hover"] if self.underMouse() else tokens["checkbox_border"]
-        pen = QPen(QColor(border_color))
+        pen = QPen(parse_qcolor(border_color))
         pen.setWidthF(1.6)
         painter.setPen(pen)
-        painter.setBrush(QColor(tokens["checkbox_bg"]))
+        painter.setBrush(parse_qcolor(tokens["checkbox_bg"]))
         painter.drawRoundedRect(rect, 5.5, 5.5)
 
         if p > 0.01:
             painter.save()
             painter.setOpacity(p)
             grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            grad.setColorAt(0.0, QColor(tokens["primary"]))
-            grad.setColorAt(1.0, QColor(tokens["primary_end"]))
+            grad.setColorAt(0.0, parse_qcolor(tokens["primary"]))
+            grad.setColorAt(1.0, parse_qcolor(tokens["primary_end"]))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
             painter.drawRoundedRect(rect, 5.5, 5.5)
@@ -417,10 +455,10 @@ class ModernToggleSwitch(QCheckBox):
         painter.setPen(Qt.PenStyle.NoPen)
 
         t = max(0.0, min(1.0, self._thumb_pos))
-        off_col = QColor(tokens["switch_track_off"])
+        off_col = parse_qcolor(tokens["switch_track_off"])
         grad = QLinearGradient(track_rect.topLeft(), track_rect.topRight())
-        grad.setColorAt(0.0, _lerp_color(off_col, QColor(tokens["primary"]), t))
-        grad.setColorAt(1.0, _lerp_color(off_col, QColor(tokens["primary_end"]), t))
+        grad.setColorAt(0.0, _lerp_color(off_col, parse_qcolor(tokens["primary"]), t))
+        grad.setColorAt(1.0, _lerp_color(off_col, parse_qcolor(tokens["primary_end"]), t))
         painter.setBrush(grad)
         painter.drawRoundedRect(track_rect, radius, radius)
 
@@ -434,7 +472,7 @@ class ModernToggleSwitch(QCheckBox):
         x = min_x + (max_x - min_x) * t
         thumb_rect = QRectF(x, track_rect.top() + margin, thumb_w, thumb_h)
 
-        painter.setBrush(QColor(tokens["switch_thumb"]))
+        painter.setBrush(parse_qcolor(tokens["switch_thumb"]))
         painter.drawRoundedRect(thumb_rect, thumb_h / 2.0, thumb_h / 2.0)
         painter.end()
 
@@ -630,17 +668,231 @@ class NotificationBellButton(QPushButton):
         painter.end()
 
 
+class NotificationRowWidget(QFrame):
+    """Clickable row inside the NotificationsPopover opening technical details on click."""
+
+    def __init__(
+        self,
+        item: NotificationItem,
+        on_click: Optional[Callable[[NotificationItem], None]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.item = item
+        self._on_click = on_click
+        normalized = "success" if item.level == "success" else "warning"
+        self.setObjectName("NotificationRow")
+        self.setProperty("level", normalized)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Clicca per visualizzare tutti i dettagli")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        icon = QLabel()
+        icon.setObjectName("ToastIcon")
+        icon.setProperty("level", normalized)
+        icon.setFixedSize(22, 22)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge_icon = (
+            make_check_icon("#ffffff", size=13)
+            if normalized == "success"
+            else make_alert_icon("#ffffff", size=13)
+        )
+        icon.setPixmap(badge_icon.pixmap(13, 13))
+
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        title_lbl = QLabel(item.title)
+        title_lbl.setObjectName("BannerTitle")
+        time_lbl = QLabel(item.timestamp)
+        time_lbl.setObjectName("MutedText")
+        top.addWidget(title_lbl, stretch=1)
+        top.addWidget(time_lbl)
+
+        msg_lbl = QLabel(item.message)
+        msg_lbl.setObjectName("MutedText")
+        msg_lbl.setWordWrap(True)
+
+        col.addLayout(top)
+        col.addWidget(msg_lbl)
+
+        if item.details or normalized == "warning":
+            hint_text = (
+                "Clicca per dettagli e soluzioni ›"
+                if normalized == "warning"
+                else "Clicca per dettagli ›"
+            )
+            hint = QLabel(hint_text)
+            hint.setObjectName("DetailLinkHint")
+            col.addWidget(hint)
+
+        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(col, stretch=1)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and self._on_click is not None:
+            self._on_click(self.item)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class NotificationDetailDialog(QDialog):
+    """Liquid Glass dialog displaying full error/notification diagnostics and suggested fixes."""
+
+    def __init__(
+        self,
+        item: NotificationItem,
+        theme: str = "light",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.item = item
+        self._theme = "dark" if theme == "dark" else "light"
+        self.setObjectName("NotificationDetailDialog")
+        self.setWindowTitle(f"PatchWise — {item.title}")
+        self.setMinimumSize(540, 420)
+        self.resize(620, 500)
+        self.setModal(True)
+
+        normalized = "success" if item.level == "success" else "warning"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(12)
+
+        card = QFrame()
+        card.setObjectName("DetailCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+
+        icon = QLabel()
+        icon.setObjectName("ToastIcon")
+        icon.setProperty("level", normalized)
+        icon.setFixedSize(30, 30)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dlg_icon = (
+            make_check_icon("#ffffff", size=16)
+            if normalized == "success"
+            else make_alert_icon("#ffffff", size=16)
+        )
+        icon.setPixmap(dlg_icon.pixmap(16, 16))
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        self.title_label = QLabel(item.title)
+        self.title_label.setObjectName("SectionTitle")
+        meta_parts = [item.timestamp]
+        if item.category_label:
+            meta_parts.append(item.category_label)
+        self.meta_label = QLabel("  ·  ".join(meta_parts))
+        self.meta_label.setObjectName("MutedText")
+        title_col.addWidget(self.title_label)
+        title_col.addWidget(self.meta_label)
+
+        header_row.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+        header_row.addLayout(title_col, stretch=1)
+        card_layout.addLayout(header_row)
+
+        self.summary_label = QLabel(item.message)
+        self.summary_label.setObjectName("BannerTitle")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        card_layout.addWidget(self.summary_label)
+
+        detail_heading = QLabel("Dettagli tecnici e azioni consigliate")
+        detail_heading.setObjectName("NavGroupLabel")
+        card_layout.addWidget(detail_heading)
+
+        self.details_box = QTextEdit()
+        self.details_box.setObjectName("DetailLogBox")
+        self.details_box.setReadOnly(True)
+        body_text = item.details.strip() if item.details.strip() else (
+            f"Titolo: {item.title}\n"
+            f"Orario: {item.timestamp}\n"
+            f"Esito: {'Completato' if normalized == 'success' else 'Avviso / Errore'}\n\n"
+            f"{item.message}"
+        )
+        self.details_box.setPlainText(body_text)
+        card_layout.addWidget(self.details_box, stretch=1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(10)
+        footer.addStretch()
+
+        tokens = get_theme_tokens(self._theme)
+        self._copy_icon = make_copy_icon(tokens["icon_color"], size=15)
+        self._copied_icon = make_check_icon("#10b981", size=15)
+
+        self.copy_btn = QPushButton("Copia dettagli")
+        self.copy_btn.setObjectName("SecondaryButton")
+        self.copy_btn.setIcon(self._copy_icon)
+        self.copy_btn.setIconSize(QSize(15, 15))
+        self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_btn.clicked.connect(self._copy_details)
+
+        self._copy_reset_timer = QTimer(self)
+        self._copy_reset_timer.setSingleShot(True)
+        self._copy_reset_timer.timeout.connect(self._reset_copy_button)
+
+        self.close_btn = QPushButton("Chiudi")
+        self.close_btn.setObjectName("PrimaryButton")
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.accept)
+
+        footer.addWidget(self.copy_btn)
+        footer.addWidget(self.close_btn)
+        card_layout.addLayout(footer)
+
+        outer.addWidget(card, stretch=1)
+        self.setStyleSheet(get_theme_qss(self._theme))
+        self._apply_windows_titlebar_theme(self._theme == "dark")
+
+    def _copy_details(self) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self.details_box.toPlainText())
+        self.copy_btn.setIcon(self._copied_icon)
+        self.copy_btn.setText("Copiato")
+        self._copy_reset_timer.start(1800)
+
+    def _reset_copy_button(self) -> None:
+        self.copy_btn.setIcon(self._copy_icon)
+        self.copy_btn.setText("Copia dettagli")
+
+    def _apply_windows_titlebar_theme(self, dark: bool) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1 if dark else 0)
+            dwm = ctypes.windll.dwmapi  # type: ignore[attr-defined]
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class NotificationsPopover(QFrame):
     """Floating notification center panel with smooth slide-down reveal."""
 
     def __init__(
         self,
         on_clear: Callable[[], None],
+        on_select: Optional[Callable[[NotificationItem], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        self._on_select = on_select
         self.setObjectName("NotificationsPopover")
-        self.setFixedWidth(380)
+        self.setFixedWidth(396)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(32)
@@ -664,12 +916,14 @@ class NotificationsPopover(QFrame):
         self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_btn.clicked.connect(on_clear)
 
-        self.close_btn = QPushButton("×")
+        self.close_btn = QPushButton()
         self.close_btn.setObjectName("ToastCloseButton")
         self.close_btn.setFixedSize(26, 26)
+        self.close_btn.setIconSize(QSize(12, 12))
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_btn.setToolTip("Chiudi notifiche")
         self.close_btn.clicked.connect(self.hide)
+        self._update_close_icon()
 
         header.addWidget(title)
         header.addWidget(self.count_badge)
@@ -684,7 +938,7 @@ class NotificationsPopover(QFrame):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setMaximumHeight(340)
+        self.scroll.setMaximumHeight(360)
         self.list_container = QWidget()
         self.list_layout = QVBoxLayout(self.list_container)
         self.list_layout.setContentsMargins(0, 2, 4, 2)
@@ -697,8 +951,13 @@ class NotificationsPopover(QFrame):
         self._slide_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
 
         self._items: list[NotificationItem] = []
+        self._row_widgets: list[NotificationRowWidget] = []
         self.set_notifications([])
         self.hide()
+
+    @property
+    def row_widgets(self) -> list[NotificationRowWidget]:
+        return list(self._row_widgets)
 
     def animate_open(self, target_pos: QPoint) -> None:
         self._slide_anim.stop()
@@ -717,6 +976,7 @@ class NotificationsPopover(QFrame):
 
     def set_notifications(self, items: Sequence[NotificationItem]) -> None:
         self._items = list(items)
+        self._row_widgets = []
         self.count_badge.setText(str(len(self._items)))
         self.clear_btn.setEnabled(bool(self._items))
 
@@ -737,65 +997,40 @@ class NotificationsPopover(QFrame):
             self.scroll.setFixedHeight(90)
         else:
             for item in self._items:
-                self.list_layout.addWidget(self._build_row(item))
-            desired_h = min(320, max(96, len(self._items) * 82 + 12))
+                row = NotificationRowWidget(item, on_click=self._on_select)
+                self._row_widgets.append(row)
+                self.list_layout.addWidget(row)
+            desired_h = min(350, max(106, len(self._items) * 96 + 14))
             self.scroll.setFixedHeight(desired_h)
 
         self.list_layout.addStretch()
         self.adjustSize()
 
-    @staticmethod
-    def _build_row(item: NotificationItem) -> QFrame:
-        normalized = "success" if item.level == "success" else "warning"
-        row = QFrame()
-        row.setObjectName("NotificationRow")
-        row.setProperty("level", normalized)
-
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
-
-        icon = QLabel("✓" if normalized == "success" else "!")
-        icon.setObjectName("ToastIcon")
-        icon.setProperty("level", normalized)
-        icon.setFixedSize(22, 22)
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        col = QVBoxLayout()
-        col.setSpacing(2)
-        top = QHBoxLayout()
-        top.setSpacing(6)
-        title_lbl = QLabel(item.title)
-        title_lbl.setObjectName("BannerTitle")
-        time_lbl = QLabel(item.timestamp)
-        time_lbl.setObjectName("MutedText")
-        top.addWidget(title_lbl, stretch=1)
-        top.addWidget(time_lbl)
-
-        msg_lbl = QLabel(item.message)
-        msg_lbl.setObjectName("MutedText")
-        msg_lbl.setWordWrap(True)
-
-        col.addLayout(top)
-        col.addWidget(msg_lbl)
-
-        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(col, stretch=1)
-        return row
+    def _update_close_icon(self) -> None:
+        theme = "dark" if _is_dark_context(self) else "light"
+        color = get_theme_tokens(theme)["toast_close_text"]
+        self.close_btn.setIcon(make_close_icon(color, size=12))
 
     def refresh_style(self) -> None:
+        self._update_close_icon()
         self.set_notifications(self._items)
         self.style().unpolish(self)
         self.style().polish(self)
 
 
 class StatusNotificationBanner(QFrame):
-    """Discreet bottom-right toast notification with smooth slide-in entrance."""
+    """Discreet bottom-right toast notification with smooth slide-in entrance and click-to-inspect."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        on_click: Optional[Callable[[NotificationItem], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("StatusToast")
         self._level = "success"
+        self._on_click = on_click
+        self._current_item: Optional[NotificationItem] = None
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(28)
@@ -807,10 +1042,11 @@ class StatusNotificationBanner(QFrame):
         layout.setContentsMargins(16, 12, 12, 12)
         layout.setSpacing(12)
 
-        self.icon_label = QLabel("✓")
+        self.icon_label = QLabel()
         self.icon_label.setObjectName("ToastIcon")
         self.icon_label.setFixedSize(26, 26)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setPixmap(make_check_icon("#ffffff", size=14).pixmap(14, 14))
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
@@ -819,15 +1055,21 @@ class StatusNotificationBanner(QFrame):
         self.message_label = QLabel("")
         self.message_label.setObjectName("ToastMessage")
         self.message_label.setWordWrap(True)
+        self.hint_label = QLabel("Clicca per visualizzare i dettagli ›")
+        self.hint_label.setObjectName("DetailLinkHint")
+        self.hint_label.hide()
         text_col.addWidget(self.title_label)
         text_col.addWidget(self.message_label)
+        text_col.addWidget(self.hint_label)
 
-        self.close_btn = QPushButton("×")
+        self.close_btn = QPushButton()
         self.close_btn.setObjectName("ToastCloseButton")
         self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setIconSize(QSize(12, 12))
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_btn.setToolTip("Chiudi notifica")
         self.close_btn.clicked.connect(self.dismiss)
+        self._update_close_icon()
 
         layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(text_col, stretch=1)
@@ -850,7 +1092,13 @@ class StatusNotificationBanner(QFrame):
     def level(self) -> str:
         return self._level
 
+    def _update_close_icon(self) -> None:
+        theme = "dark" if _is_dark_context(self) else "light"
+        color = get_theme_tokens(theme)["toast_close_text"]
+        self.close_btn.setIcon(make_close_icon(color, size=12))
+
     def refresh_style(self) -> None:
+        self._update_close_icon()
         for widget in (self, self.icon_label, self.title_label, self.message_label):
             widget.setProperty("level", self._level)
             widget.style().unpolish(widget)
@@ -876,21 +1124,53 @@ class StatusNotificationBanner(QFrame):
         message: str,
         level: str = "success",
         duration_ms: Optional[int] = None,
+        item: Optional[NotificationItem] = None,
     ) -> None:
         normalized = "success" if level == "success" else "warning"
         self._level = normalized
-        self.icon_label.setText("✓" if normalized == "success" else "!")
+        self._current_item = item or NotificationItem(
+            title=title, message=message, level=normalized
+        )
+        toast_icon = (
+            make_check_icon("#ffffff", size=14)
+            if normalized == "success"
+            else make_alert_icon("#ffffff", size=14)
+        )
+        self.icon_label.setPixmap(toast_icon.pixmap(14, 14))
         self.title_label.setText(title)
         self.message_label.setText(message)
+        show_hint = bool(
+            self._on_click is not None
+            and (normalized == "warning" or bool(self._current_item.details))
+        )
+        self.hint_label.setVisible(show_hint)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if self._on_click is not None
+            else Qt.CursorShape.ArrowCursor
+        )
         self.refresh_style()
 
         self.show()
         self.raise_()
 
-        timeout = duration_ms if duration_ms is not None else (4500 if normalized == "success" else 7000)
+        timeout = duration_ms if duration_ms is not None else (4500 if normalized == "success" else 7500)
         self._hide_timer.stop()
         if timeout > 0:
             self._hide_timer.start(timeout)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._on_click is not None
+            and self._current_item is not None
+        ):
+            target = self._current_item
+            self.dismiss()
+            self._on_click(target)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def dismiss(self) -> None:
         self._hide_timer.stop()
@@ -1094,9 +1374,6 @@ class AppUpdateCard(QFrame):
         )
         layout.addWidget(self.checkbox)
 
-        avatar = AppAvatarBadge(candidate.name, size=40)
-        layout.addWidget(avatar)
-
         info_col = QVBoxLayout()
         info_col.setSpacing(6)
 
@@ -1146,8 +1423,11 @@ class AppUpdateCard(QFrame):
         layout.addLayout(info_col, stretch=1)
 
         # Strictly manual trigger — NO auto-update switch!
-        self.update_btn = QPushButton("Aggiorna Ora")
+        self._download_icon = make_download_icon("#ffffff", size=14)
+        self.update_btn = QPushButton("Aggiorna")
         self.update_btn.setObjectName("PrimaryButton")
+        self.update_btn.setIcon(self._download_icon)
+        self.update_btn.setIconSize(QSize(14, 14))
         self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_btn.clicked.connect(lambda: on_update_click(candidate))
         layout.addWidget(self.update_btn)
@@ -1155,46 +1435,70 @@ class AppUpdateCard(QFrame):
     def set_updating_state(self, phase: UpdatePhase) -> None:
         if phase in (UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING, UpdatePhase.INSTALLING):
             self.update_btn.setEnabled(False)
+            self.update_btn.setIcon(QIcon())
             self.update_btn.setText("In corso...")
             self.checkbox.setEnabled(False)
         elif phase == UpdatePhase.COMPLETED:
             self.update_btn.setEnabled(False)
+            self.update_btn.setIcon(QIcon())
             self.update_btn.setText("Aggiornato")
             self.checkbox.setEnabled(False)
         else:
             self.update_btn.setEnabled(True)
-            self.update_btn.setText("Aggiorna Ora")
+            self.update_btn.setIcon(self._download_icon)
+            self.update_btn.setText("Aggiorna")
             self.checkbox.setEnabled(True)
 
 
 class HistoryRowWidget(QFrame):
     """Single row in the stateless session update history view."""
 
-    def __init__(self, record: UpdateRecord, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        record: UpdateRecord,
+        on_inspect: Optional[Callable[[UpdateRecord], None]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
+        self._record = record
+        self._on_inspect = on_inspect
         self.setObjectName("Card")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(12)
 
-        avatar = AppAvatarBadge(record.app_name, size=34)
-        layout.addWidget(avatar)
-
         name_col = QVBoxLayout()
         name_col.setSpacing(2)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
         title = QLabel(f"{record.app_name}  ·  {record.publisher}")
         title.setObjectName("CardTitle")
+        type_badge = QLabel("Driver" if record.item_type == "driver" else "App")
+        type_badge.setObjectName("HistoryTypeBadge")
+        type_badge.setProperty(
+            "item_type", "driver" if record.item_type == "driver" else "app"
+        )
+        title_row.addWidget(title)
+        title_row.addWidget(type_badge)
+        title_row.addStretch()
+
         meta = QLabel(
             f"v{record.from_version} → v{record.to_version}  ·  "
             f"{record.completed_at}  ·  {record.duration_seconds:.1f}s"
         )
         meta.setObjectName("MutedText")
-        name_col.addWidget(title)
+        name_col.addLayout(title_row)
         name_col.addWidget(meta)
+
+        if record.status == "failed" and record.error_message:
+            err_preview = QLabel(record.error_message)
+            err_preview.setObjectName("MutedText")
+            err_preview.setWordWrap(True)
+            name_col.addWidget(err_preview)
 
         status_text = {
             "success": "Completato",
-            "failed": f"Fallito ({record.error_message})" if record.error_message else "Fallito",
+            "failed": "Fallito",
             "cancelled": "Annullato",
         }.get(record.status, record.status)
         status_label = QLabel(status_text)
@@ -1205,4 +1509,23 @@ class HistoryRowWidget(QFrame):
         )
 
         layout.addLayout(name_col, stretch=1)
-        layout.addWidget(status_label)
+        layout.addWidget(status_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        if on_inspect is not None and (record.status == "failed" or record.error_details):
+            self.details_btn = QPushButton("Dettagli")
+            self.details_btn.setObjectName("GhostLinkButton")
+            self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.details_btn.clicked.connect(lambda: on_inspect(record))
+            layout.addWidget(self.details_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._on_inspect is not None
+            and (self._record.status == "failed" or self._record.error_details)
+        ):
+            self._on_inspect(self._record)
+            event.accept()
+            return
+        super().mousePressEvent(event)
